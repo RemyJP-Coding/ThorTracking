@@ -12,6 +12,7 @@ import {
   latestByVariant,
   modelDisplay,
   parseShipmentDashboard,
+  predictShippingWindow,
   shortModelDisplay,
   variantKey,
   type ModelId,
@@ -24,8 +25,11 @@ import {
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const WATCH_STORAGE_KEY = 'thor-track.watch.v1';
 const WATCH_CHANGE_EVENT = 'thor-track-watch-change';
+const THEME_STORAGE_KEY = 'thor-track.theme.v1';
+const THEME_CHANGE_EVENT = 'thor-track-theme-change';
 
 type SourceState = 'checking' | 'live' | 'fallback';
+type Theme = 'light' | 'dark';
 
 function formatDate(date: string, options?: Intl.DateTimeFormatOptions) {
   return new Intl.DateTimeFormat('en-US', {
@@ -39,6 +43,12 @@ function formatDate(date: string, options?: Intl.DateTimeFormatOptions) {
 
 function formatRange(start: number, end: number) {
   return `${start}xx—${end}xx`;
+}
+
+function confidenceLabel(confidence: 'very-low' | 'low' | 'moderate') {
+  if (confidence === 'very-low') return 'Very low confidence';
+  if (confidence === 'moderate') return 'Moderate confidence';
+  return 'Low confidence';
 }
 
 function formatCheckedAt(value: string | null) {
@@ -89,6 +99,65 @@ function writeStoredWatch(watch: ShipmentWatch | null) {
   window.dispatchEvent(new Event(WATCH_CHANGE_EVENT));
 }
 
+function readStoredTheme(): Theme | null {
+  try {
+    const theme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return theme === 'light' || theme === 'dark' ? theme : null;
+  } catch {
+    return null;
+  }
+}
+
+function preferredTheme(): Theme {
+  return readStoredTheme() ?? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
+
+function applyTheme(theme: Theme) {
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+}
+
+function subscribeToTheme(onStoreChange: () => void) {
+  const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+  const syncStoredTheme = (event: StorageEvent) => {
+    if (event.key !== null && event.key !== THEME_STORAGE_KEY) return;
+    applyTheme(preferredTheme());
+    onStoreChange();
+  };
+  const syncSystemTheme = () => {
+    if (readStoredTheme()) return;
+    applyTheme(preferredTheme());
+    onStoreChange();
+  };
+
+  window.addEventListener('storage', syncStoredTheme);
+  window.addEventListener(THEME_CHANGE_EVENT, onStoreChange);
+  colorScheme.addEventListener('change', syncSystemTheme);
+  return () => {
+    window.removeEventListener('storage', syncStoredTheme);
+    window.removeEventListener(THEME_CHANGE_EVENT, onStoreChange);
+    colorScheme.removeEventListener('change', syncSystemTheme);
+  };
+}
+
+function getThemeSnapshot(): Theme {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
+function getServerThemeSnapshot(): Theme {
+  return 'light';
+}
+
+function writeTheme(theme: Theme) {
+  applyTheme(theme);
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // The active tab still keeps the chosen theme when storage is unavailable.
+  }
+  window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
+}
+
 function statusCopy(status: WatchStatus) {
   if (status.kind === 'listed') {
     return {
@@ -123,6 +192,7 @@ function statusCopy(status: WatchStatus) {
 }
 
 export function ThorTracker() {
+  const theme = useSyncExternalStore(subscribeToTheme, getThemeSnapshot, getServerThemeSnapshot);
   const [days, setDays] = useState<ShipmentDay[]>(FALLBACK_SHIPMENTS);
   const [sourceState, setSourceState] = useState<SourceState>('checking');
   const [sourceUpdatedAt, setSourceUpdatedAt] = useState<string | null>(null);
@@ -202,6 +272,10 @@ export function ThorTracker() {
 
   const watchedStatus = useMemo(() => (watch ? evaluateWatch(days, watch) : null), [days, watch]);
   const watchedCopy = watchedStatus ? statusCopy(watchedStatus) : null;
+  const watchedForecast = useMemo(
+    () => (watch && watchedStatus?.kind === 'watching' ? predictShippingWindow(days, watch) : null),
+    [days, watch, watchedStatus],
+  );
 
   const [trendColor, trendModel] = trendKey.split(':') as [ThorColor, ModelId];
   const trendSeries = useMemo(
@@ -253,26 +327,40 @@ export function ThorTracker() {
     writeStoredWatch(null);
   }
 
+  function toggleTheme() {
+    writeTheme(theme === 'dark' ? 'light' : 'dark');
+  }
+
   return (
-    <main className="min-h-screen bg-[var(--paper)] text-[var(--ink)]">
-      <header className="border-b border-black/10">
+    <main className="min-h-screen bg-[var(--paper)] text-[var(--text)]">
+      <header className="border-b border-[var(--line)]">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 sm:px-8 lg:px-10">
           <a href="#top" className="flex shrink-0 items-center gap-3" aria-label="Thor Track home">
             <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--ink)] text-sm font-black text-[var(--volt)]">T</span>
             <span className="leading-none">
               <span className="block text-sm font-black tracking-[-0.03em]">THOR TRACK</span>
-              <span className="mt-1 block text-[9px] font-bold uppercase tracking-[0.22em] text-black/45">Dispatch watch</span>
+              <span className="mt-1 block text-[9px] font-bold uppercase tracking-[0.22em] text-[var(--text-45)]">Dispatch watch</span>
             </span>
           </a>
 
-          <div className="flex items-center gap-3 sm:gap-5">
-            <a href="#timeline" className="hidden text-xs font-bold text-black/55 transition hover:text-black sm:block">Timeline</a>
-            <a href={SOURCE_PAGE_URL} target="_blank" rel="noreferrer" className="hidden text-xs font-bold text-black/55 transition hover:text-black md:block">Official source ↗</a>
+          <div className="flex items-center gap-2 sm:gap-3 lg:gap-5">
+            <a href="#timeline" className="hidden text-xs font-bold text-[var(--text-55)] transition hover:text-[var(--text)] sm:block">Timeline</a>
+            <a href={SOURCE_PAGE_URL} target="_blank" rel="noreferrer" className="hidden text-xs font-bold text-[var(--text-55)] transition hover:text-[var(--text)] md:block">Official source ↗</a>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label="Dark mode"
+              aria-pressed={theme === 'dark'}
+              className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] focus:outline-none focus:ring-4 focus:ring-[var(--focus-ring-soft)]"
+            >
+              <span aria-hidden="true" className="text-sm leading-none">{theme === 'dark' ? '☾' : '☀'}</span>
+              <span className="hidden lg:inline">{theme === 'dark' ? 'Dark' : 'Light'}</span>
+            </button>
             <button
               type="button"
               onClick={() => void refreshData()}
               disabled={refreshing}
-              className="flex items-center gap-2 rounded-full border border-black/10 bg-white/65 px-3 py-2 text-[11px] font-black text-black/60 transition hover:bg-white disabled:cursor-wait"
+              className="flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] disabled:cursor-wait"
               aria-label="Refresh AYN shipment data"
             >
               <span className={`h-2 w-2 rounded-full ${sourceState === 'live' ? 'bg-[#35a853]' : sourceState === 'checking' ? 'bg-[#e2a42d]' : 'bg-[#d26345]'}`} />
@@ -285,57 +373,57 @@ export function ThorTracker() {
       <div id="top" className="mx-auto max-w-7xl px-5 pb-16 pt-12 sm:px-8 sm:pt-16 lg:px-10">
         <section className="grid items-end gap-10 lg:grid-cols-[1.06fr_0.94fr]">
           <div>
-            <p className="mb-5 text-xs font-black uppercase tracking-[0.2em] text-black/45">Independent AYN Thor shipment tracker</p>
+            <p className="mb-5 text-xs font-black uppercase tracking-[0.2em] text-[var(--text-45)]">Independent AYN Thor shipment tracker</p>
             <h1 className="max-w-3xl text-[clamp(3.25rem,7vw,6.8rem)] font-black leading-[0.88] tracking-[-0.075em]">Know when your Thor is in the clear.</h1>
-            <p className="mt-7 max-w-xl text-base leading-7 text-black/60 sm:text-lg">Save your order prefix and exact configuration. Thor Track watches AYN’s published dispatch ranges and shows where your order stands.</p>
+            <p className="mt-7 max-w-xl text-base leading-7 text-[var(--text-60)] sm:text-lg">Save your order prefix and exact configuration. Thor Track watches AYN’s published dispatch ranges and shows where your order stands.</p>
 
-            <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-xs font-bold text-black/45">
-              <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-black/30" />Checks every 10 minutes while open</span>
-              <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-black/30" />Only a masked prefix is saved</span>
+            <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-xs font-bold text-[var(--text-45)]">
+              <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Checks every 10 minutes while open</span>
+              <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Only a masked prefix is saved</span>
             </div>
           </div>
 
-          <section aria-labelledby="watch-title" className="rounded-[28px] border border-black/10 bg-white p-5 shadow-[0_24px_70px_rgba(20,20,17,0.08)] sm:p-7">
+          <section aria-labelledby="watch-title" className="rounded-[28px] border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[0_24px_70px_var(--shadow)] sm:p-7">
             <div className="mb-6 flex items-start justify-between gap-4">
               <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-black/40">Order watch</p>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-40)]">Order watch</p>
                 <h2 id="watch-title" className="mt-2 text-2xl font-black tracking-[-0.04em]">{watch ? `${watch.prefix}xx is on watch` : 'Track your place'}</h2>
               </div>
-              <span className="rounded-full bg-[var(--volt)] px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.14em]">Auto checks</span>
+              <span className="rounded-full bg-[var(--volt)] px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.14em] text-[var(--accent-ink)]">Auto checks</span>
             </div>
 
             <form className="space-y-4" onSubmit={saveWatch} noValidate>
               <label className="block">
-                <span className="mb-2 block text-xs font-bold text-black/55">AYN order number</span>
+                <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">AYN order number</span>
                 <input
                   value={orderInput}
                   onChange={(event) => setOrderDraft(event.target.value)}
                   inputMode="numeric"
                   autoComplete="off"
                   placeholder="#251612"
-                  className="h-14 w-full rounded-2xl border border-black/15 bg-[var(--paper)] px-4 text-lg font-bold outline-none transition focus:border-black focus:ring-4 focus:ring-black/5"
+                  className="h-14 w-full rounded-2xl border border-[var(--line-strong)] bg-[var(--paper)] px-4 text-lg font-bold outline-none transition focus:border-[var(--text)] focus:ring-4 focus:ring-[var(--focus-ring-soft)]"
                   aria-describedby="order-help order-error"
                 />
               </label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-black/55">Color</span>
-                  <select value={color} onChange={(event) => setColorDraft(event.target.value as ThorColor)} className="h-12 w-full rounded-xl border border-black/15 bg-white px-3 text-sm font-bold outline-none focus:border-black">
+                  <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">Color</span>
+                  <select value={color} onChange={(event) => setColorDraft(event.target.value as ThorColor)} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
                     {COLORS.map((item) => <option key={item}>{item}</option>)}
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-black/55">Model</span>
-                  <select value={model} onChange={(event) => setModelDraft(event.target.value as ModelId)} className="h-12 w-full rounded-xl border border-black/15 bg-white px-3 text-sm font-bold outline-none focus:border-black">
+                  <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">Model</span>
+                  <select value={model} onChange={(event) => setModelDraft(event.target.value as ModelId)} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
                     {MODELS.map((item) => <option value={item.id} key={item.id}>{item.label} {item.detail}</option>)}
                   </select>
                 </label>
               </div>
-              <button type="submit" className="h-14 w-full rounded-2xl bg-[var(--ink)] px-5 text-sm font-black text-white transition hover:-translate-y-0.5 hover:bg-black focus:outline-none focus:ring-4 focus:ring-black/20 active:translate-y-0">
+              <button type="submit" className="h-14 w-full rounded-2xl bg-[var(--ink)] px-5 text-sm font-black text-white transition hover:-translate-y-0.5 hover:bg-[var(--panel-hover)] focus:outline-none focus:ring-4 focus:ring-[var(--focus-ring-strong)] active:translate-y-0">
                 {watch ? 'Update this watch' : 'Watch this order'} <span aria-hidden="true">→</span>
               </button>
-              <p id="order-help" className="text-center text-[11px] leading-5 text-black/45">AYN publishes the first 4 digits. Your full order number is never retained.</p>
-              {formError ? <p id="order-error" role="alert" className="rounded-xl bg-[#fff0e7] px-3 py-2 text-center text-xs font-bold text-[#8b361d]">{formError}</p> : null}
+              <p id="order-help" className="text-center text-[11px] leading-5 text-[var(--text-45)]">AYN publishes the first 4 digits. Your full order number is never retained.</p>
+              {formError ? <p id="order-error" role="alert" className="error-message rounded-xl px-3 py-2 text-center text-xs font-bold">{formError}</p> : null}
             </form>
 
             {watch && watchedCopy ? (
@@ -346,6 +434,30 @@ export function ThorTracker() {
                 </div>
                 <p className="mt-2 text-lg font-black leading-6 tracking-[-0.025em]">{watchedCopy.title}</p>
                 <p className="mt-2 text-xs leading-5 opacity-70">{watchedCopy.body}</p>
+                {watchedStatus?.kind === 'watching' ? (
+                  watchedForecast ? (
+                    <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.07] p-4">
+                      <p className="text-[9px] font-black uppercase tracking-[0.18em] text-[var(--volt)]">Estimated AYN dispatch window</p>
+                      <p className="mt-2 flex flex-wrap items-baseline gap-x-1 text-2xl font-black tracking-[-0.045em]">
+                        <time dateTime={watchedForecast.windowStart}>{formatDate(watchedForecast.windowStart, { year: undefined })}</time>
+                        <span aria-hidden="true">–</span><span className="sr-only">to</span>
+                        <time dateTime={watchedForecast.windowEnd}>{formatDate(watchedForecast.windowEnd)}</time>
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-bold text-white/55">
+                        <span>{confidenceLabel(sourceState === 'live' ? watchedForecast.confidence : watchedForecast.confidence === 'very-low' ? 'very-low' : 'low')}</span>
+                        <span>{watchedForecast.gap} prefix {watchedForecast.gap === 1 ? 'step' : 'steps'} ahead</span>
+                      </div>
+                      <p className="mt-3 text-[11px] leading-5 text-white/55">
+                        Based on {watchedForecast.intervalCount} exact-configuration {watchedForecast.intervalCount === 1 ? 'advance' : 'advances'} through {formatDate(watchedForecast.sourceDate)}. {sourceState === 'live' ? '' : 'AYN live data is unavailable, so this uses the last-known timeline. '}This is a trend estimate for AYN’s dashboard—not an AYN promise or carrier delivery ETA.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.07] p-4">
+                      <p className="text-[9px] font-black uppercase tracking-[0.18em] text-[var(--volt)]">Weekly estimate unavailable</p>
+                      <p className="mt-2 text-[11px] leading-5 text-white/55">A responsible one-week estimate is not available for this queue yet. Its history may be too sparse, too stale, or too far beyond the measured trend.</p>
+                    </div>
+                  )
+                ) : null}
                 <div className="mt-4 flex items-center justify-between gap-3 border-t border-current/10 pt-3 text-[11px] font-bold">
                   <span>{watch.color} · {shortModelDisplay(watch.model)}</span>
                   <span className="font-mono">{watch.prefix}xx</span>
@@ -355,15 +467,15 @@ export function ThorTracker() {
           </section>
         </section>
 
-        <section className="mt-16 border-t border-black/10 pt-8" aria-labelledby="latest-title">
+        <section className="mt-16 border-t border-[var(--line)] pt-8" aria-labelledby="latest-title">
           <div className="grid gap-8 lg:grid-cols-[0.62fr_1.38fr]">
             <div>
               <div className="flex flex-wrap items-center gap-3">
-                <span className="rounded-full bg-[var(--volt)] px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em]">Latest dispatch</span>
-                <span className="text-xs font-bold text-black/45">{formatDate(latestDay.date)}</span>
+                <span className="rounded-full bg-[var(--volt)] px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-[var(--accent-ink)]">Latest dispatch</span>
+                <span className="text-xs font-bold text-[var(--text-45)]">{formatDate(latestDay.date)}</span>
               </div>
               <h2 id="latest-title" className="mt-5 text-4xl font-black tracking-[-0.055em] sm:text-5xl">{latestDay.entries.length} Thor {latestDay.entries.length === 1 ? 'range' : 'ranges'} moved.</h2>
-              <p className="mt-4 max-w-md text-sm leading-6 text-black/55">These are the newest Thor rows on AYN’s dashboard—not a combined frontier across every model.</p>
+              <p className="mt-4 max-w-md text-sm leading-6 text-[var(--text-55)]">These are the newest Thor rows on AYN’s dashboard—not a combined frontier across every model.</p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               {latestDay.entries.map((item, index) => (
@@ -387,7 +499,7 @@ export function ThorTracker() {
                 {latestTrend ? <p className="mt-2 text-sm text-white/50">Latest endpoint <span className="font-mono font-bold text-[var(--volt)]">{latestTrend.endPrefix}xx</span></p> : null}
               </div>
               <select value={trendKey} onChange={(event) => setTrendKeyOverride(event.target.value)} aria-label="Choose configuration trend" className="h-11 rounded-xl border border-white/15 bg-white/10 px-3 text-xs font-bold text-white outline-none focus:border-[var(--volt)]">
-                {latestVariants.map((item) => <option className="text-black" value={variantKey(item.color, item.model)} key={variantKey(item.color, item.model)}>{item.color} · {modelDisplay(item.model)}</option>)}
+                {latestVariants.map((item) => <option className="text-[var(--option-text)]" value={variantKey(item.color, item.model)} key={variantKey(item.color, item.model)}>{item.color} · {modelDisplay(item.model)}</option>)}
               </select>
             </div>
 
@@ -410,26 +522,26 @@ export function ThorTracker() {
             </div>
           </div>
 
-          <div className="rounded-[28px] border border-black/10 bg-white/65 p-6 sm:p-8">
+          <div className="rounded-[28px] border border-[var(--line)] bg-[var(--surface-soft)] p-6 sm:p-8">
             <div className="flex flex-wrap items-end justify-between gap-5">
               <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-black/40">Latest by configuration</p>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-40)]">Latest by configuration</p>
                 <h2 className="mt-2 text-3xl font-black tracking-[-0.045em]">Every queue, separately.</h2>
               </div>
               <div className="flex flex-wrap gap-1" aria-label="Filter configurations by color">
                 {(['All', ...COLORS] as const).map((item) => (
-                  <button key={item} type="button" onClick={() => setColorFilter(item)} aria-pressed={colorFilter === item} className={`rounded-full px-3 py-2 text-[10px] font-black transition ${colorFilter === item ? 'bg-[var(--ink)] text-white' : 'bg-black/5 text-black/50 hover:bg-black/10'}`}>{item}</button>
+                  <button key={item} type="button" onClick={() => setColorFilter(item)} aria-pressed={colorFilter === item} className={`rounded-full px-3 py-2 text-[10px] font-black transition ${colorFilter === item ? 'bg-[var(--ink)] text-white' : 'bg-[var(--fill-subtle)] text-[var(--text-50)] hover:bg-[var(--fill-hover)]'}`}>{item}</button>
                 ))}
               </div>
             </div>
             <div className="mt-7 grid gap-x-7 sm:grid-cols-2">
               {filteredLatest.map((item) => (
-                <article key={variantKey(item.color, item.model)} className="flex items-center justify-between gap-4 border-t border-black/10 py-4">
+                <article key={variantKey(item.color, item.model)} className="flex items-center justify-between gap-4 border-t border-[var(--line)] py-4">
                   <div>
                     <h3 className="text-sm font-black">{item.color} · {shortModelDisplay(item.model)}</h3>
-                    <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.08em] text-black/35">{formatDate(item.date)}</p>
+                    <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-35)]">{formatDate(item.date)}</p>
                   </div>
-                  <p className="whitespace-nowrap font-mono text-xs font-bold text-black/60">{formatRange(item.startPrefix, item.endPrefix)}</p>
+                  <p className="whitespace-nowrap font-mono text-xs font-bold text-[var(--text-60)]">{formatRange(item.startPrefix, item.endPrefix)}</p>
                 </article>
               ))}
             </div>
@@ -439,31 +551,31 @@ export function ThorTracker() {
         <section id="timeline" className="mt-20 scroll-mt-8" aria-labelledby="timeline-title">
           <div className="mb-8 flex flex-wrap items-end justify-between gap-5">
             <div>
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-black/40">Shipment log</p>
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-40)]">Shipment log</p>
               <h2 id="timeline-title" className="mt-2 text-3xl font-black tracking-[-0.045em]">Dispatch timeline</h2>
             </div>
-            <label className="flex items-center gap-3 text-xs font-bold text-black/45">
+            <label className="flex items-center gap-3 text-xs font-bold text-[var(--text-45)]">
               Show
-              <select value={timelineFilter} onChange={(event) => { setTimelineFilter(event.target.value); setShowAllTimeline(false); }} className="h-11 max-w-64 rounded-xl border border-black/10 bg-white/70 px-3 text-xs font-bold text-black outline-none focus:border-black">
+              <select value={timelineFilter} onChange={(event) => { setTimelineFilter(event.target.value); setShowAllTimeline(false); }} className="h-11 max-w-64 rounded-xl border border-[var(--line)] bg-[var(--surface-strong)] px-3 text-xs font-bold text-[var(--text)] outline-none focus:border-[var(--text)]">
                 <option value="all">All Thor updates</option>
                 {latestVariants.map((item) => <option value={variantKey(item.color, item.model)} key={variantKey(item.color, item.model)}>{item.color} · {modelDisplay(item.model)}</option>)}
               </select>
             </label>
           </div>
 
-          <div className="border-t border-black/10">
+          <div className="border-t border-[var(--line)]">
             {visibleTimeline.map((day, dayIndex) => (
-              <article key={day.date} className="grid gap-5 border-b border-black/10 py-6 sm:grid-cols-[165px_1fr] sm:py-8">
+              <article key={day.date} className="grid gap-5 border-b border-[var(--line)] py-6 sm:grid-cols-[165px_1fr] sm:py-8">
                 <div className="flex items-baseline gap-3 sm:block">
                   <p className="text-2xl font-black tracking-[-0.04em]">{formatDate(day.date, { year: undefined })}</p>
-                  <p className="mt-1 text-xs font-bold text-black/40">{formatDate(day.date, { weekday: 'long', month: undefined, day: undefined, year: undefined })}</p>
-                  {dayIndex === 0 ? <span className="rounded-full bg-[var(--volt)] px-2 py-1 text-[9px] font-black uppercase tracking-[0.12em] sm:mt-3 sm:inline-block">Newest</span> : null}
+                  <p className="mt-1 text-xs font-bold text-[var(--text-40)]">{formatDate(day.date, { weekday: 'long', month: undefined, day: undefined, year: undefined })}</p>
+                  {dayIndex === 0 ? <span className="rounded-full bg-[var(--volt)] px-2 py-1 text-[9px] font-black uppercase tracking-[0.12em] text-[var(--accent-ink)] sm:mt-3 sm:inline-block">Newest</span> : null}
                 </div>
                 <div className="grid gap-x-6 gap-y-3 lg:grid-cols-2">
                   {day.entries.map((item) => (
-                    <div key={`${day.date}-${item.color}-${item.model}-${item.startPrefix}`} className="flex items-center justify-between gap-5 rounded-xl bg-white/65 px-4 py-3">
+                    <div key={`${day.date}-${item.color}-${item.model}-${item.startPrefix}`} className="flex items-center justify-between gap-5 rounded-xl bg-[var(--surface-soft)] px-4 py-3">
                       <span className="text-sm font-bold">{item.color} · {shortModelDisplay(item.model)}</span>
-                      <span className="whitespace-nowrap font-mono text-xs font-bold text-black/55">{formatRange(item.startPrefix, item.endPrefix)}</span>
+                      <span className="whitespace-nowrap font-mono text-xs font-bold text-[var(--text-55)]">{formatRange(item.startPrefix, item.endPrefix)}</span>
                     </div>
                   ))}
                 </div>
@@ -471,24 +583,24 @@ export function ThorTracker() {
             ))}
           </div>
           {filteredTimeline.length > 7 ? (
-            <button type="button" onClick={() => setShowAllTimeline((value) => !value)} className="mt-6 rounded-full border border-black/15 px-5 py-3 text-xs font-black transition hover:bg-white" aria-expanded={showAllTimeline}>
+            <button type="button" onClick={() => setShowAllTimeline((value) => !value)} className="mt-6 rounded-full border border-[var(--line-strong)] px-5 py-3 text-xs font-black transition hover:bg-[var(--surface)]" aria-expanded={showAllTimeline}>
               {showAllTimeline ? 'Show recent updates' : `Show all ${filteredTimeline.length} update days`}
             </button>
           ) : null}
         </section>
 
-        <aside className="mt-20 grid gap-5 rounded-[28px] border border-black/10 bg-white/55 p-6 sm:grid-cols-[1fr_auto] sm:items-center sm:p-8" aria-label="About this tracker">
+        <aside className="mt-20 grid gap-5 rounded-[28px] border border-[var(--line)] bg-[var(--surface-muted)] p-6 sm:grid-cols-[1fr_auto] sm:items-center sm:p-8" aria-label="About this tracker">
           <div>
             <p className="text-sm font-black">A clear read of AYN’s public data.</p>
-            <p className="mt-2 max-w-3xl text-xs leading-5 text-black/50">“Listed” means the first four digits appear inside a range AYN posted for the exact color and tier. It is not carrier tracking, delivery confirmation, or an ETA. Plain “Max” on AYN’s dashboard is treated as the 1TB queue; “Max (512)” remains separate.</p>
-            {sourceUpdatedAt ? <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.08em] text-black/35">Source page updated {new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sourceUpdatedAt))}</p> : null}
+            <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-50)]">“Listed” means the first four digits appear inside a range AYN posted for the exact color and tier. It is not carrier tracking, delivery confirmation, or an ETA. Plain “Max” on AYN’s dashboard is treated as the 1TB queue; “Max (512)” remains separate.</p>
+            {sourceUpdatedAt ? <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-35)]">Source page updated {new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sourceUpdatedAt))}</p> : null}
           </div>
           <a href={SOURCE_PAGE_URL} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center justify-center rounded-full bg-[var(--ink)] px-5 text-xs font-black text-white transition hover:-translate-y-0.5">Open AYN dashboard ↗</a>
         </aside>
       </div>
 
-      <footer className="border-t border-black/10">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-7 text-[10px] font-bold uppercase tracking-[0.12em] text-black/35 sm:px-8 lg:px-10">
+      <footer className="border-t border-[var(--line)]">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-7 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--text-35)] sm:px-8 lg:px-10">
           <span>Thor Track · Unofficial community utility</span>
           <span>Local watch · Live public source</span>
         </div>

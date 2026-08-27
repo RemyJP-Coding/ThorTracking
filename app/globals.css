@@ -2,8 +2,64 @@
 
 :root {
   --paper: #f2f0e8;
+  --text: #171814;
   --ink: #171814;
   --volt: #d8ff3e;
+  --accent-ink: #171814;
+  --surface: #ffffff;
+  --surface-soft: rgb(255 255 255 / 65%);
+  --surface-strong: rgb(255 255 255 / 70%);
+  --surface-muted: rgb(255 255 255 / 55%);
+  --line: rgb(0 0 0 / 10%);
+  --line-strong: rgb(0 0 0 / 15%);
+  --text-30: rgb(0 0 0 / 30%);
+  --text-35: rgb(0 0 0 / 35%);
+  --text-40: rgb(0 0 0 / 40%);
+  --text-45: rgb(0 0 0 / 45%);
+  --text-50: rgb(0 0 0 / 50%);
+  --text-55: rgb(0 0 0 / 55%);
+  --text-60: rgb(0 0 0 / 60%);
+  --fill-subtle: rgb(0 0 0 / 5%);
+  --fill-hover: rgb(0 0 0 / 10%);
+  --focus-ring-soft: rgb(0 0 0 / 5%);
+  --focus-ring-strong: rgb(0 0 0 / 20%);
+  --panel-hover: #000000;
+  --option-text: #171814;
+  --shadow: rgb(20 20 17 / 8%);
+  --warning-line: rgb(155 80 37 / 18%);
+  --warning-surface: #fff0e7;
+  --warning-text: #71331f;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --paper: #0e100d;
+  --text: #f2f4ec;
+  --ink: #070806;
+  --surface: #1b1e18;
+  --surface-soft: rgb(27 30 24 / 88%);
+  --surface-strong: #1b1e18;
+  --surface-muted: rgb(27 30 24 / 72%);
+  --line: rgb(255 255 255 / 12%);
+  --line-strong: rgb(255 255 255 / 18%);
+  --text-30: rgb(242 244 236 / 40%);
+  --text-35: rgb(242 244 236 / 46%);
+  --text-40: rgb(242 244 236 / 52%);
+  --text-45: rgb(242 244 236 / 58%);
+  --text-50: rgb(242 244 236 / 64%);
+  --text-55: rgb(242 244 236 / 70%);
+  --text-60: rgb(242 244 236 / 76%);
+  --fill-subtle: rgb(255 255 255 / 6%);
+  --fill-hover: rgb(255 255 255 / 11%);
+  --focus-ring-soft: rgb(216 255 62 / 14%);
+  --focus-ring-strong: rgb(216 255 62 / 24%);
+  --panel-hover: #12150e;
+  --option-text: #f2f4ec;
+  --shadow: rgb(0 0 0 / 36%);
+  --warning-line: rgb(255 174 127 / 25%);
+  --warning-surface: #3a2118;
+  --warning-text: #ffc4ae;
+  color-scheme: dark;
 }
 
 * {
@@ -11,6 +67,7 @@
 }
 
 html {
+  background: var(--paper);
   scroll-behavior: smooth;
 }
 
@@ -18,14 +75,16 @@ body {
   margin: 0;
   min-width: 320px;
   background: var(--paper);
-  color: var(--ink);
+  color: var(--text);
   font-family: Arial, Helvetica, sans-serif;
   text-rendering: optimizeLegibility;
+  transition: background-color 180ms ease, color 180ms ease;
 }
 
 button,
 input,
 select {
+  color: inherit;
   font: inherit;
 }
 
@@ -47,15 +106,20 @@ select {
 }
 
 .watch-result--passed {
-  border-color: rgb(155 80 37 / 18%);
-  background: #fff0e7;
-  color: #71331f;
+  border-color: var(--warning-line);
+  background: var(--warning-surface);
+  color: var(--warning-text);
 }
 
 .watch-result--empty {
-  border-color: rgb(0 0 0 / 10%);
-  background: #f4f3ee;
-  color: var(--ink);
+  border-color: var(--line);
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.error-message {
+  background: var(--warning-surface);
+  color: var(--warning-text);
 }
 
 @media (prefers-reduced-motion: reduce) {

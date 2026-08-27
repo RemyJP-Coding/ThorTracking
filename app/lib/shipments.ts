@@ -39,6 +39,19 @@ export type WatchStatus =
   | { kind: 'passed'; latest: ShipmentEntry }
   | { kind: 'no-data' };
 
+export type ShippingForecast = {
+  windowStart: string;
+  windowEnd: string;
+  asOfDate: string;
+  sourceDate: string;
+  lastVariantDate: string;
+  ratePerDay: number;
+  intervalCount: number;
+  latestPrefix: number;
+  gap: number;
+  confidence: 'very-low' | 'low' | 'moderate';
+};
+
 export const variantKey = (color: ThorColor, model: ModelId) => `${color}:${model}`;
 
 export function modelDisplay(model: ModelId) {
@@ -185,6 +198,144 @@ export function evaluateWatch(days: ShipmentDay[], watch: ShipmentWatch): WatchS
   const highestPublished = Math.max(...entries.map((entry) => entry.endPrefix));
   if (watch.prefix > highestPublished) return { kind: 'watching', latest, distance: watch.prefix - highestPublished };
   return { kind: 'passed', latest };
+}
+
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+function dateValue(date: string) {
+  return Date.parse(`${date}T00:00:00Z`);
+}
+
+function daysBetween(start: string, end: string) {
+  return Math.round((dateValue(end) - dateValue(start)) / DAY_IN_MS);
+}
+
+function addDays(date: string, amount: number) {
+  return new Date(dateValue(date) + amount * DAY_IN_MS).toISOString().slice(0, 10);
+}
+
+function localCalendarDate(now = new Date()) {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function median(values: number[]) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const midpoint = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[midpoint - 1] + sorted[midpoint]) / 2 : sorted[midpoint];
+}
+
+function quantile(values: number[], percentile: number) {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0];
+  const position = (sorted.length - 1) * percentile;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  const weight = position - lowerIndex;
+  return sorted[lowerIndex] * (1 - weight) + sorted[upperIndex] * weight;
+}
+
+export function predictShippingWindow(
+  days: ShipmentDay[],
+  watch: ShipmentWatch,
+  today = localCalendarDate(),
+): ShippingForecast | null {
+  if (days.length === 0) return null;
+
+  const variantEntries = entriesForVariant(days, watch.color, watch.model);
+  if (variantEntries.length === 0) return null;
+
+  const dailyEndpoints = new Map<string, number>();
+  for (const item of variantEntries) {
+    dailyEndpoints.set(item.date, Math.max(dailyEndpoints.get(item.date) ?? 0, item.endPrefix));
+  }
+
+  const frontier: Array<{ date: string; endPrefix: number }> = [];
+  let highestEndpoint = 0;
+  for (const [date, endPrefix] of [...dailyEndpoints.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (endPrefix <= highestEndpoint) continue;
+    highestEndpoint = endPrefix;
+    frontier.push({ date, endPrefix });
+  }
+
+  const latestFrontier = frontier.at(-1);
+  if (!latestFrontier || watch.prefix <= latestFrontier.endPrefix || frontier.length < 2) return null;
+
+  const sourceDate = days.reduce((latest, day) => (day.date > latest ? day.date : latest), days[0].date);
+  const observations = [...frontier];
+  if (latestFrontier.date < sourceDate) {
+    observations.push({ date: sourceDate, endPrefix: latestFrontier.endPrefix });
+  }
+
+  const recentCutoff = addDays(sourceDate, -28);
+  let training = observations.filter((point) => point.date >= recentCutoff).slice(-8);
+  if (training.length < 3) training = observations.slice(-3);
+  if (training.length < 2) return null;
+
+  const pairwiseRates: number[] = [];
+  for (let startIndex = 0; startIndex < training.length - 1; startIndex += 1) {
+    for (let endIndex = startIndex + 1; endIndex < training.length; endIndex += 1) {
+      const elapsedDays = daysBetween(training[startIndex].date, training[endIndex].date);
+      if (elapsedDays <= 0) continue;
+      pairwiseRates.push((training[endIndex].endPrefix - training[startIndex].endPrefix) / elapsedDays);
+    }
+  }
+
+  if (pairwiseRates.length === 0) return null;
+  const ratePerDay = median(pairwiseRates);
+  if (!Number.isFinite(ratePerDay) || ratePerDay <= 0) return null;
+
+  const gap = watch.prefix - latestFrontier.endPrefix;
+  const observedMovement = training.at(-1)!.endPrefix - training[0].endPrefix;
+  if (observedMovement <= 0) return null;
+
+  const projectedDays = Math.max(1, Math.ceil(gap / ratePerDay));
+  if (projectedDays > 90) return null;
+
+  const validToday = /^\d{4}-\d{2}-\d{2}$/.test(today) ? today : sourceDate;
+  const asOfDate = validToday > sourceDate ? validToday : sourceDate;
+  const sourceAgeDays = Math.max(0, daysBetween(sourceDate, asOfDate));
+  if (sourceAgeDays > 45) return null;
+  if (daysBetween(latestFrontier.date, asOfDate) > 28) return null;
+
+  const projectedCrossing = addDays(asOfDate, projectedDays);
+  const earliestPossibleStart = addDays(asOfDate, 1);
+  const centeredStart = addDays(projectedCrossing, -3);
+  const windowStart = centeredStart > earliestPossibleStart ? centeredStart : earliestPossibleStart;
+  const windowEnd = addDays(windowStart, 6);
+
+  const lowerQuartile = quantile(pairwiseRates, 0.25);
+  const upperQuartile = quantile(pairwiseRates, 0.75);
+  const spreadRatio = lowerQuartile > 0 ? upperQuartile / lowerQuartile : Number.POSITIVE_INFINITY;
+  const intervalCount = training.slice(1).filter((point, index) => point.endPrefix > training[index].endPrefix).length;
+  const historySpanDays = daysBetween(training[0].date, training.at(-1)!.date);
+  let confidence: ShippingForecast['confidence'] = intervalCount === 1 ? 'very-low' : 'low';
+  if (
+    training.length >= 4 &&
+    intervalCount >= 3 &&
+    historySpanDays >= 14 &&
+    spreadRatio <= 3 &&
+    gap <= observedMovement &&
+    projectedDays <= historySpanDays &&
+    sourceAgeDays <= 14
+  ) {
+    confidence = 'moderate';
+  }
+
+  return {
+    windowStart,
+    windowEnd,
+    asOfDate,
+    sourceDate,
+    lastVariantDate: latestFrontier.date,
+    ratePerDay,
+    intervalCount,
+    latestPrefix: latestFrontier.endPrefix,
+    gap,
+    confidence,
+  };
 }
 
 function entry(sourceVariant: string, startPrefix: number, endPrefix: number): ShipmentEntry {

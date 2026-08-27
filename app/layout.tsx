@@ -1,6 +1,27 @@
 import type { Metadata } from 'next';
 import './globals.css';
 
+const themeBootstrapScript = `
+  (() => {
+    const storageKey = 'thor-track.theme.v1';
+    let theme = 'light';
+
+    try {
+      const storedTheme = window.localStorage.getItem(storageKey);
+      theme = storedTheme === 'light' || storedTheme === 'dark'
+        ? storedTheme
+        : window.matchMedia('(prefers-color-scheme: dark)').matches
+          ? 'dark'
+          : 'light';
+    } catch {
+      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  })();
+`;
+
 export const metadata: Metadata = {
   title: 'Thor Track — AYN Shipment Watch',
   description: 'Track AYN Thor order-number ranges and follow the latest shipment timeline.',
@@ -24,7 +45,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
+      </head>
       <body>{children}</body>
     </html>
   );
