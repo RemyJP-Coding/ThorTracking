@@ -349,12 +349,12 @@ export function ThorTracker() {
             <button
               type="button"
               onClick={toggleTheme}
-              aria-label="Dark mode"
+              aria-label="Toggle color theme"
               aria-pressed={theme === 'dark'}
-              className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] focus:outline-none focus:ring-4 focus:ring-[var(--focus-ring-soft)]"
+              className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--paper)]"
             >
-              <span aria-hidden="true" className="text-sm leading-none">{theme === 'dark' ? '☾' : '☀'}</span>
-              <span className="hidden lg:inline">{theme === 'dark' ? 'Dark' : 'Light'}</span>
+              <span aria-hidden="true" className="text-sm leading-none">◐</span>
+              <span className="hidden lg:inline">Theme</span>
             </button>
             <button
               type="button"

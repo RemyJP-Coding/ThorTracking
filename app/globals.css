@@ -23,6 +23,7 @@
   --fill-hover: rgb(0 0 0 / 10%);
   --focus-ring-soft: rgb(0 0 0 / 5%);
   --focus-ring-strong: rgb(0 0 0 / 20%);
+  --focus-ring: #171814;
   --panel-hover: #000000;
   --option-text: #171814;
   --shadow: rgb(20 20 17 / 8%);
@@ -53,6 +54,7 @@
   --fill-hover: rgb(255 255 255 / 11%);
   --focus-ring-soft: rgb(216 255 62 / 14%);
   --focus-ring-strong: rgb(216 255 62 / 24%);
+  --focus-ring: #d8ff3e;
   --panel-hover: #12150e;
   --option-text: #f2f4ec;
   --shadow: rgb(0 0 0 / 36%);
