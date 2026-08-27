@@ -1,0 +1,68 @@
+@import 'tailwindcss';
+
+:root {
+  --paper: #f2f0e8;
+  --ink: #171814;
+  --volt: #d8ff3e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: var(--volt);
+  color: var(--ink);
+}
+
+.watch-result--listed {
+  border-color: rgb(108 128 25 / 28%);
+  background: var(--volt);
+  color: var(--ink);
+}
+
+.watch-result--watching {
+  border-color: transparent;
+  background: var(--ink);
+  color: white;
+}
+
+.watch-result--passed {
+  border-color: rgb(155 80 37 / 18%);
+  background: #fff0e7;
+  color: #71331f;
+}
+
+.watch-result--empty {
+  border-color: rgb(0 0 0 / 10%);
+  background: #f4f3ee;
+  color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

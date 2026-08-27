@@ -1,0 +1,257 @@
+export const SOURCE_PAGE_URL = 'https://www.ayntec.com/pages/shipment-dashboard';
+export const SOURCE_JSON_URL = `${SOURCE_PAGE_URL}.json`;
+
+export const COLORS = ['Black', 'White', 'Rainbow', 'Clear Purple'] as const;
+export type ThorColor = (typeof COLORS)[number];
+
+export const MODELS = [
+  { id: 'lite', label: 'Lite', detail: '8+128GB' },
+  { id: 'base', label: 'Base', detail: '8+128GB' },
+  { id: 'pro', label: 'Pro', detail: '12+256GB' },
+  { id: 'max-512', label: 'Max', detail: '16+512GB' },
+  { id: 'max-1tb', label: 'Max', detail: '16+1TB' },
+] as const;
+
+export type ModelId = (typeof MODELS)[number]['id'];
+
+export type ShipmentEntry = {
+  color: ThorColor;
+  model: ModelId;
+  sourceVariant: string;
+  startPrefix: number;
+  endPrefix: number;
+};
+
+export type ShipmentDay = {
+  date: string;
+  entries: ShipmentEntry[];
+};
+
+export type ShipmentWatch = {
+  prefix: number;
+  color: ThorColor;
+  model: ModelId;
+};
+
+export type WatchStatus =
+  | { kind: 'listed'; match: ShipmentEntry; date: string; latest: ShipmentEntry }
+  | { kind: 'watching'; latest: ShipmentEntry; distance: number }
+  | { kind: 'passed'; latest: ShipmentEntry }
+  | { kind: 'no-data' };
+
+export const variantKey = (color: ThorColor, model: ModelId) => `${color}:${model}`;
+
+export function modelDisplay(model: ModelId) {
+  const match = MODELS.find((item) => item.id === model);
+  return match ? `${match.label} ${match.detail}` : model;
+}
+
+export function shortModelDisplay(model: ModelId) {
+  if (model === 'max-512') return 'Max 512GB';
+  if (model === 'max-1tb') return 'Max 1TB';
+  return MODELS.find((item) => item.id === model)?.label ?? model;
+}
+
+function decodeEntities(value: string) {
+  const named: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    nbsp: ' ',
+    quot: '"',
+  };
+
+  return value.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (entity, token: string) => {
+    if (token.startsWith('#x')) return String.fromCodePoint(Number.parseInt(token.slice(2), 16));
+    if (token.startsWith('#')) return String.fromCodePoint(Number.parseInt(token.slice(1), 10));
+    return named[token.toLowerCase()] ?? entity;
+  });
+}
+
+function textLinesFromParagraph(html: string) {
+  return decodeEntities(
+    html
+      .replace(/<br\s*\/?\s*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\u00a0/g, ' '),
+  )
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function toIsoDate(year: string, month: string, day: string) {
+  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+}
+
+function parseVariant(sourceVariant: string): Pick<ShipmentEntry, 'color' | 'model'> | null {
+  const normalized = sourceVariant
+    .replace(/[（）]/g, (character) => (character === '（' ? '(' : ')'))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const color = COLORS.find((candidate) => normalized.toLowerCase().startsWith(candidate.toLowerCase()));
+  if (!color) return null;
+
+  const tier = normalized.slice(color.length).trim();
+  let model: ModelId | null = null;
+  if (/^lite$/i.test(tier)) model = 'lite';
+  if (/^base$/i.test(tier)) model = 'base';
+  if (/^pro$/i.test(tier)) model = 'pro';
+  if (/^max\s*\(512\)$/i.test(tier)) model = 'max-512';
+  if (/^max$/i.test(tier)) model = 'max-1tb';
+
+  return model ? { color, model } : null;
+}
+
+export function parseShipmentDashboard(bodyHtml: string): ShipmentDay[] {
+  const paragraphs = [...bodyHtml.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)];
+  const days = new Map<string, ShipmentEntry[]>();
+  const unparsedThorRows: string[] = [];
+  let currentDate: string | null = null;
+
+  for (const paragraph of paragraphs) {
+    for (const line of textLinesFromParagraph(paragraph[1])) {
+      const dateMatch = line.match(/^(20\d{2})\/(\d{1,2})\/(\d{1,2})$/);
+      if (dateMatch) {
+        currentDate = toIsoDate(dateMatch[1], dateMatch[2], dateMatch[3]);
+        if (!days.has(currentDate)) days.set(currentDate, []);
+        continue;
+      }
+
+      if (!/^AYN\s+Thor\s+/i.test(line)) continue;
+      if (!currentDate) {
+        unparsedThorRows.push(line);
+        continue;
+      }
+      const rangeMatch = line.match(/^AYN\s+Thor\s+(.+?):\s*(\d{4})\s*xx\s*[-–—]{1,2}\s*(\d{4})\s*xx\s*$/i);
+      if (!rangeMatch) {
+        unparsedThorRows.push(line);
+        continue;
+      }
+      const variant = parseVariant(rangeMatch[1]);
+      if (!variant) {
+        unparsedThorRows.push(line);
+        continue;
+      }
+
+      days.get(currentDate)?.push({
+        ...variant,
+        sourceVariant: rangeMatch[1].trim(),
+        startPrefix: Number(rangeMatch[2]),
+        endPrefix: Number(rangeMatch[3]),
+      });
+    }
+  }
+
+  if (unparsedThorRows.length > 0) {
+    throw new Error(`AYN published ${unparsedThorRows.length} Thor row(s) in an unrecognized format`);
+  }
+
+  return [...days.entries()]
+    .filter(([, entries]) => entries.length > 0)
+    .map(([date, entries]) => ({ date, entries }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export function entriesForVariant(days: ShipmentDay[], color: ThorColor, model: ModelId) {
+  return days.flatMap((day) =>
+    day.entries
+      .filter((entry) => entry.color === color && entry.model === model)
+      .map((entry) => ({ ...entry, date: day.date })),
+  );
+}
+
+export function latestByVariant(days: ShipmentDay[]) {
+  const latest = new Map<string, ShipmentEntry & { date: string }>();
+  for (const day of days) {
+    for (const entry of day.entries) latest.set(variantKey(entry.color, entry.model), { ...entry, date: day.date });
+  }
+  return [...latest.values()].sort((a, b) => {
+    const dateOrder = b.date.localeCompare(a.date);
+    if (dateOrder !== 0) return dateOrder;
+    return a.color.localeCompare(b.color) || modelDisplay(a.model).localeCompare(modelDisplay(b.model));
+  });
+}
+
+export function evaluateWatch(days: ShipmentDay[], watch: ShipmentWatch): WatchStatus {
+  const entries = entriesForVariant(days, watch.color, watch.model);
+  if (entries.length === 0) return { kind: 'no-data' };
+
+  const latest = entries.at(-1)!;
+  const match = entries.find((entry) => watch.prefix >= entry.startPrefix && watch.prefix <= entry.endPrefix);
+  if (match) return { kind: 'listed', match, date: match.date, latest };
+
+  const highestPublished = Math.max(...entries.map((entry) => entry.endPrefix));
+  if (watch.prefix > highestPublished) return { kind: 'watching', latest, distance: watch.prefix - highestPublished };
+  return { kind: 'passed', latest };
+}
+
+function entry(sourceVariant: string, startPrefix: number, endPrefix: number): ShipmentEntry {
+  const parsed = parseVariant(sourceVariant);
+  if (!parsed) throw new Error(`Unsupported fallback variant: ${sourceVariant}`);
+  return { ...parsed, sourceVariant, startPrefix, endPrefix };
+}
+
+function day(date: string, rows: Array<[string, number, number]>): ShipmentDay {
+  return { date, entries: rows.map(([variant, start, end]) => entry(variant, start, end)) };
+}
+
+export const FALLBACK_SHIPMENTS: ShipmentDay[] = [
+  day('2026-07-10', [
+    ['Black Max', 2280, 2299], ['White Pro', 2237, 2375], ['Clear Purple Pro', 2250, 2335],
+    ['White Max (512)', 2403, 2458], ['Rainbow Max (512)', 2343, 2355], ['Clear Purple Max (512)', 2353, 2378],
+  ]),
+  day('2026-07-13', [
+    ['Black Base', 2254, 2316], ['White Pro', 2375, 2411], ['Rainbow Pro', 2308, 2411],
+    ['Clear Purple Pro', 2335, 2342], ['Black Max (512)', 2142, 2314],
+  ]),
+  day('2026-07-15', [
+    ['Black Base', 2316, 2353], ['Black Pro', 2271, 2314], ['White Pro', 2411, 2462],
+    ['Rainbow Pro', 2411, 2430], ['Clear Purple Pro', 2342, 2398],
+  ]),
+  day('2026-07-16', [
+    ['White Max', 2248, 2294], ['Black Max', 2299, 2358], ['Rainbow Max', 2292, 2356], ['Rainbow Max (512)', 2355, 2365],
+  ]),
+  day('2026-07-17', [
+    ['White Max', 2294, 2316], ['Black Max', 2358, 2369], ['Rainbow Max', 2356, 2366],
+    ['Clear Purple Max', 2252, 2319], ['Black Max (512)', 2314, 2318],
+  ]),
+  day('2026-08-07', [
+    ['Black Pro', 2314, 2430], ['Rainbow Pro', 2430, 2491], ['Rainbow Max', 2366, 2450],
+    ['Clear Purple Pro', 2398, 2465], ['White Max (512)', 2458, 2551], ['Clear Purple Max (512)', 2378, 2429],
+  ]),
+  day('2026-08-09', [['Black Max (512)', 2318, 2424], ['Rainbow Max (512)', 2365, 2467]]),
+  day('2026-08-10', [
+    ['Black Max', 2369, 2439], ['Rainbow Max', 2450, 2485], ['White Max', 2316, 2345],
+    ['Clear Purple Max', 2319, 2386], ['Black Max (512)', 2424, 2472], ['Rainbow Max (512)', 2467, 2472],
+  ]),
+  day('2026-08-11', [
+    ['Black Pro', 2430, 2448], ['Rainbow Pro', 2491, 2502], ['White Max', 2345, 2361],
+    ['Clear Purple Pro', 2465, 2484], ['Clear Purple Max (512)', 2429, 2446],
+  ]),
+  day('2026-08-12', [
+    ['Black Lite', 2425, 2478], ['Black Base', 2353, 2428], ['White Pro', 2462, 2483], ['White Max (512)', 2551, 2580],
+  ]),
+  day('2026-08-13', [['Clear Purple Pro', 2484, 2498], ['Black Max (512)', 2472, 2490]]),
+  day('2026-08-15', [
+    ['Black Base', 2428, 2431], ['Black Pro', 2448, 2471], ['Rainbow Max', 2485, 2493], ['White Max', 2361, 2381],
+    ['Clear Purple Max', 2386, 2414], ['White Max (512)', 2580, 2627], ['Clear Purple Max (512)', 2446, 2490],
+  ]),
+  day('2026-08-17', [
+    ['Black Pro', 2471, 2493], ['Rainbow Max', 2493, 2500], ['Rainbow Pro', 2502, 2529], ['Rainbow Max (512)', 2472, 2600],
+  ]),
+  day('2026-08-18', [
+    ['Black Base', 2428, 2444], ['Rainbow Max', 2500, 2560], ['White Pro', 2483, 2573], ['Clear Purple Pro', 2498, 2530],
+  ]),
+  day('2026-08-20', [
+    ['Black Pro', 2493, 2516], ['Rainbow Max', 2500, 2582], ['White Max', 2381, 2489], ['Black Max', 2439, 2522],
+  ]),
+  day('2026-08-21', [
+    ['Black Base', 2444, 2530], ['Black Max (512)', 2490, 2542], ['Clear Purple Max', 2414, 2434], ['Clear Purple Max (512)', 2490, 2568],
+  ]),
+  day('2026-08-24', [
+    ['White Pro', 2483, 2647], ['Rainbow Max', 2582, 2638], ['Clear Purple Max (512)', 2568, 2665],
+  ]),
+  day('2026-08-25', [['Black Base', 2530, 2548], ['Black Lite', 2478, 2776]]),
+];
