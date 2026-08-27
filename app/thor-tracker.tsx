@@ -333,7 +333,7 @@ export function ThorTracker() {
 
   return (
     <main className="min-h-screen bg-[var(--paper)] text-[var(--text)]">
-      <header className="border-b border-[var(--line)]">
+      <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-surface)] backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 sm:px-8 lg:px-10">
           <a href="#top" className="flex shrink-0 items-center gap-3" aria-label="Thor Track home">
             <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--ink)] text-sm font-black text-[var(--volt)]">T</span>
@@ -354,7 +354,7 @@ export function ThorTracker() {
               className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--paper)]"
             >
               <span aria-hidden="true" className="text-sm leading-none">◐</span>
-              <span className="hidden lg:inline">Theme</span>
+              <span className="hidden sm:inline">Theme</span>
             </button>
             <button
               type="button"

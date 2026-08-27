@@ -10,6 +10,7 @@
   --surface-soft: rgb(255 255 255 / 65%);
   --surface-strong: rgb(255 255 255 / 70%);
   --surface-muted: rgb(255 255 255 / 55%);
+  --header-surface: rgb(242 240 232 / 88%);
   --line: rgb(0 0 0 / 10%);
   --line-strong: rgb(0 0 0 / 15%);
   --text-30: rgb(0 0 0 / 30%);
@@ -41,6 +42,7 @@
   --surface-soft: rgb(27 30 24 / 88%);
   --surface-strong: #1b1e18;
   --surface-muted: rgb(27 30 24 / 72%);
+  --header-surface: rgb(14 16 13 / 88%);
   --line: rgb(255 255 255 / 12%);
   --line-strong: rgb(255 255 255 / 18%);
   --text-30: rgb(242 244 236 / 40%);
