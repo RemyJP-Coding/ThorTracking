@@ -5,13 +5,11 @@ import {
   COLORS,
   FALLBACK_SHIPMENTS,
   MODELS,
-  SOURCE_JSON_URL,
   SOURCE_PAGE_URL,
   entriesForVariant,
   evaluateWatch,
   latestByVariant,
   modelDisplay,
-  parseShipmentDashboard,
   predictShippingWindow,
   shortModelDisplay,
   variantKey,
@@ -21,24 +19,29 @@ import {
   type ThorColor,
   type WatchStatus,
 } from './lib/shipments';
+import { readWatchSnapshot, writeWatchSnapshot, type WatchStorage } from './lib/watch-storage';
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-const WATCH_STORAGE_KEY = 'thor-track.watch.v1';
 const WATCH_CHANGE_EVENT = 'thor-track-watch-change';
 const THEME_STORAGE_KEY = 'thor-track.theme.v1';
 const THEME_CHANGE_EVENT = 'thor-track-theme-change';
+const SHIPMENTS_API_URL = '/api/shipments';
 
 type SourceState = 'checking' | 'live' | 'fallback';
 type Theme = 'light' | 'dark';
 
 function formatDate(date: string, options?: Intl.DateTimeFormatOptions) {
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    timeZone: 'UTC',
-    ...options,
-  }).format(new Date(`${date}T12:00:00Z`));
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+      ...options,
+    }).format(new Date(`${date}T12:00:00Z`));
+  } catch {
+    return date;
+  }
 }
 
 function formatRange(start: number, end: number) {
@@ -53,7 +56,25 @@ function confidenceLabel(confidence: 'very-low' | 'low' | 'moderate') {
 
 function formatCheckedAt(value: string | null) {
   if (!value) return 'Connecting';
-  return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(value));
+  try {
+    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(value));
+  } catch {
+    return new Date(value).toLocaleTimeString();
+  }
+}
+
+function formatSourceUpdatedAt(value: string) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
 }
 
 function safeStoredWatch(value: string | null): ShipmentWatch | null {
@@ -85,8 +106,20 @@ function subscribeToStoredWatch(onStoreChange: () => void) {
   };
 }
 
+let volatileWatchSnapshot = '';
+
+function getBrowserStorage(): WatchStorage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 function getStoredWatchSnapshot() {
-  return window.localStorage.getItem(WATCH_STORAGE_KEY) ?? '';
+  const result = readWatchSnapshot(getBrowserStorage(), volatileWatchSnapshot);
+  if (result.available) volatileWatchSnapshot = result.snapshot;
+  return result.snapshot;
 }
 
 function getServerWatchSnapshot() {
@@ -94,9 +127,10 @@ function getServerWatchSnapshot() {
 }
 
 function writeStoredWatch(watch: ShipmentWatch | null) {
-  if (watch) window.localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watch));
-  else window.localStorage.removeItem(WATCH_STORAGE_KEY);
+  const result = writeWatchSnapshot(getBrowserStorage(), watch);
+  volatileWatchSnapshot = result.snapshot;
   window.dispatchEvent(new Event(WATCH_CHANGE_EVENT));
+  return result.persisted;
 }
 
 function readStoredTheme(): Theme | null {
@@ -109,7 +143,15 @@ function readStoredTheme(): Theme | null {
 }
 
 function preferredTheme(): Theme {
-  return readStoredTheme() ?? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const storedTheme = readStoredTheme();
+  if (storedTheme) return storedTheme;
+  try {
+    return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+  } catch {
+    return 'light';
+  }
 }
 
 function applyTheme(theme: Theme) {
@@ -118,7 +160,14 @@ function applyTheme(theme: Theme) {
 }
 
 function subscribeToTheme(onStoreChange: () => void) {
-  const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+  let colorScheme: MediaQueryList | null = null;
+  try {
+    if (typeof window.matchMedia === 'function') {
+      colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+    }
+  } catch {
+    colorScheme = null;
+  }
   const syncStoredTheme = (event: StorageEvent) => {
     if (event.key !== null && event.key !== THEME_STORAGE_KEY) return;
     applyTheme(preferredTheme());
@@ -132,11 +181,19 @@ function subscribeToTheme(onStoreChange: () => void) {
 
   window.addEventListener('storage', syncStoredTheme);
   window.addEventListener(THEME_CHANGE_EVENT, onStoreChange);
-  colorScheme.addEventListener('change', syncSystemTheme);
+  if (colorScheme && typeof colorScheme.addEventListener === 'function') {
+    colorScheme.addEventListener('change', syncSystemTheme);
+  } else if (colorScheme && typeof colorScheme.addListener === 'function') {
+    colorScheme.addListener(syncSystemTheme);
+  }
   return () => {
     window.removeEventListener('storage', syncStoredTheme);
     window.removeEventListener(THEME_CHANGE_EVENT, onStoreChange);
-    colorScheme.removeEventListener('change', syncSystemTheme);
+    if (colorScheme && typeof colorScheme.removeEventListener === 'function') {
+      colorScheme.removeEventListener('change', syncSystemTheme);
+    } else if (colorScheme && typeof colorScheme.removeListener === 'function') {
+      colorScheme.removeListener(syncSystemTheme);
+    }
   };
 }
 
@@ -196,7 +253,7 @@ export function ThorTracker() {
   const [days, setDays] = useState<ShipmentDay[]>(FALLBACK_SHIPMENTS);
   const [sourceState, setSourceState] = useState<SourceState>('checking');
   const [sourceUpdatedAt, setSourceUpdatedAt] = useState<string | null>(null);
-  const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState('Connecting to AYN…');
   const [refreshing, setRefreshing] = useState(false);
   const lastAttemptRef = useRef(0);
 
@@ -213,33 +270,45 @@ export function ThorTracker() {
   const color = colorDraft ?? watch?.color ?? 'Black';
   const model = modelDraft ?? watch?.model ?? 'base';
   const [formError, setFormError] = useState('');
+  const [watchFeedback, setWatchFeedback] = useState<{ kind: 'saved' | 'session'; message: string } | null>(null);
   const [trendKeyOverride, setTrendKeyOverride] = useState<string | null>(null);
   const trendKey = trendKeyOverride ?? (watch ? variantKey(watch.color, watch.model) : variantKey('Black', 'base'));
   const [colorFilter, setColorFilter] = useState<ThorColor | 'All'>('All');
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [showAllTimeline, setShowAllTimeline] = useState(false);
 
-  const refreshData = useCallback(async () => {
+  const refreshData = useCallback(async (manual = false) => {
     setRefreshing(true);
+    setSourceState('checking');
+    if (manual) setRefreshNotice('Checking AYN for the latest shipment ranges…');
     lastAttemptRef.current = Date.now();
+    const attemptedAt = new Date().toISOString();
     try {
-      const response = await fetch(SOURCE_JSON_URL, {
+      const response = await fetch(SHIPMENTS_API_URL, {
         cache: 'no-store',
         headers: { Accept: 'application/json' },
       });
-      if (!response.ok) throw new Error(`AYN returned ${response.status}`);
+      if (!response.ok) throw new Error(`Shipment feed returned ${response.status}`);
       const payload = (await response.json()) as {
-        page?: { body_html?: string; updated_at?: string };
+        status?: string;
+        checkedAt?: string;
+        sourceUpdatedAt?: string | null;
+        days?: ShipmentDay[];
       };
-      if (!payload.page?.body_html) throw new Error('AYN page body was missing');
-      const parsed = parseShipmentDashboard(payload.page.body_html);
-      if (parsed.length === 0) throw new Error('No Thor shipment rows were found');
-      setDays(parsed);
-      setSourceUpdatedAt(payload.page.updated_at ?? null);
-      setLastChecked(new Date().toISOString());
+      if (payload.status !== 'live' || !Array.isArray(payload.days) || payload.days.length === 0) {
+        throw new Error('Shipment feed payload was invalid');
+      }
+      setDays(payload.days);
+      setSourceUpdatedAt(payload.sourceUpdatedAt ?? null);
+      const checkedAt = payload.checkedAt ?? attemptedAt;
       setSourceState('live');
+      setRefreshNotice(`Live AYN data checked at ${formatCheckedAt(checkedAt)}.`);
     } catch {
       setSourceState('fallback');
+      const fallbackDate = FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date;
+      setRefreshNotice(
+        `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing last-known data${fallbackDate ? ` through ${formatDate(fallbackDate)}` : ''}.`,
+      );
     } finally {
       setRefreshing(false);
     }
@@ -263,7 +332,7 @@ export function ThorTracker() {
     };
   }, [refreshData]);
 
-  const latestDay = days.at(-1) ?? FALLBACK_SHIPMENTS.at(-1)!;
+  const latestDay = days[days.length - 1] ?? FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]!;
   const latestVariants = useMemo(() => latestByVariant(days), [days]);
   const filteredLatest = useMemo(
     () => latestVariants.filter((entry) => colorFilter === 'All' || entry.color === colorFilter),
@@ -285,8 +354,8 @@ export function ThorTracker() {
   const trendEnds = trendSeries.map((entry) => entry.endPrefix);
   const trendMin = trendEnds.length ? Math.min(...trendEnds) : 0;
   const trendMax = trendEnds.length ? Math.max(...trendEnds) : 0;
-  const latestTrend = trendSeries.at(-1);
-  const previousTrend = trendSeries.at(-2);
+  const latestTrend = trendSeries[trendSeries.length - 1];
+  const previousTrend = trendSeries.length > 1 ? trendSeries[trendSeries.length - 2] : undefined;
   const trendDelta = latestTrend && previousTrend ? latestTrend.endPrefix - previousTrend.endPrefix : null;
 
   const filteredTimeline = useMemo(() => {
@@ -309,14 +378,21 @@ export function ThorTracker() {
     const digits = orderInput.match(/\d/g)?.join('') ?? '';
     if (digits.length < 4) {
       setFormError('Enter at least the first four digits of your AYN order number.');
+      setWatchFeedback(null);
       return;
     }
 
     const nextWatch: ShipmentWatch = { prefix: Number(digits.slice(0, 4)), color, model };
+    const persisted = writeStoredWatch(nextWatch);
     setOrderDraft(`${nextWatch.prefix}xx`);
     setFormError('');
     setTrendKeyOverride(variantKey(color, model));
-    writeStoredWatch(nextWatch);
+    setWatchFeedback({
+      kind: persisted ? 'saved' : 'session',
+      message: persisted
+        ? `Saved on this browser: watching ${nextWatch.prefix}xx · ${color} · ${shortModelDisplay(model)}.`
+        : `Watching ${nextWatch.prefix}xx for this tab. This phone blocked browser storage, so the watch may disappear when you close it.`,
+    });
   }
 
   function removeWatch() {
@@ -324,6 +400,7 @@ export function ThorTracker() {
     setColorDraft(null);
     setModelDraft(null);
     setFormError('');
+    setWatchFeedback(null);
     writeStoredWatch(null);
   }
 
@@ -334,7 +411,7 @@ export function ThorTracker() {
   return (
     <main className="min-h-screen bg-[var(--paper)] text-[var(--text)]">
       <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-surface)] backdrop-blur-xl">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 sm:px-8 lg:px-10">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-5 pb-2 pt-4 sm:gap-4 sm:px-8 sm:pb-2 sm:pt-5 lg:px-10">
           <a href="#top" className="flex shrink-0 items-center gap-3" aria-label="Thor Track home">
             <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--ink)] text-sm font-black text-[var(--volt)]">T</span>
             <span className="leading-none">
@@ -358,15 +435,21 @@ export function ThorTracker() {
             </button>
             <button
               type="button"
-              onClick={() => void refreshData()}
+              onClick={() => void refreshData(true)}
               disabled={refreshing}
-              className="flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] disabled:cursor-wait"
+              aria-busy={refreshing}
+              className="flex min-h-11 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] disabled:cursor-wait"
               aria-label="Refresh AYN shipment data"
             >
               <span className={`h-2 w-2 rounded-full ${sourceState === 'live' ? 'bg-[#35a853]' : sourceState === 'checking' ? 'bg-[#e2a42d]' : 'bg-[#d26345]'}`} />
-              {refreshing ? 'Checking AYN' : sourceState === 'live' ? `Live · ${formatCheckedAt(lastChecked)}` : 'Last known data'}
+              {refreshing ? 'Checking…' : 'Refresh'}
             </button>
           </div>
+        </div>
+        <div className="mx-auto max-w-7xl px-5 pb-3 text-right sm:px-8 lg:px-10">
+          <p role="status" aria-live="polite" className="text-[10px] font-bold leading-4 text-[var(--text-45)]">
+            {refreshNotice}
+          </p>
         </div>
       </header>
 
@@ -397,24 +480,26 @@ export function ThorTracker() {
                 <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">AYN order number</span>
                 <input
                   value={orderInput}
-                  onChange={(event) => setOrderDraft(event.target.value)}
+                  onChange={(event) => { setOrderDraft(event.target.value); setWatchFeedback(null); }}
                   inputMode="numeric"
                   autoComplete="off"
                   placeholder="#251612"
                   className="h-14 w-full rounded-2xl border border-[var(--line-strong)] bg-[var(--paper)] px-4 text-lg font-bold outline-none transition focus:border-[var(--text)] focus:ring-4 focus:ring-[var(--focus-ring-soft)]"
-                  aria-describedby="order-help order-error"
+                  aria-describedby={`order-help${formError ? ' order-error' : ''}`}
+                  aria-invalid={formError ? true : undefined}
+                  aria-errormessage={formError ? 'order-error' : undefined}
                 />
               </label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">Color</span>
-                  <select value={color} onChange={(event) => setColorDraft(event.target.value as ThorColor)} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
+                  <select value={color} onChange={(event) => { setColorDraft(event.target.value as ThorColor); setWatchFeedback(null); }} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
                     {COLORS.map((item) => <option key={item}>{item}</option>)}
                   </select>
                 </label>
                 <label className="block">
                   <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">Model</span>
-                  <select value={model} onChange={(event) => setModelDraft(event.target.value as ModelId)} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
+                  <select value={model} onChange={(event) => { setModelDraft(event.target.value as ModelId); setWatchFeedback(null); }} className="h-12 w-full rounded-xl border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-sm font-bold outline-none focus:border-[var(--text)]">
                     {MODELS.map((item) => <option value={item.id} key={item.id}>{item.label} {item.detail}</option>)}
                   </select>
                 </label>
@@ -422,6 +507,14 @@ export function ThorTracker() {
               <button type="submit" className="h-14 w-full rounded-2xl bg-[var(--ink)] px-5 text-sm font-black text-white transition hover:-translate-y-0.5 hover:bg-[var(--panel-hover)] focus:outline-none focus:ring-4 focus:ring-[var(--focus-ring-strong)] active:translate-y-0">
                 {watch ? 'Update this watch' : 'Watch this order'} <span aria-hidden="true">→</span>
               </button>
+              {watchFeedback ? (
+                <p
+                  role={watchFeedback.kind === 'session' ? 'alert' : 'status'}
+                  className={`rounded-xl px-3 py-2 text-center text-xs font-bold ${watchFeedback.kind === 'session' ? 'error-message' : 'bg-[var(--surface-soft)] text-[var(--text-60)]'}`}
+                >
+                  {watchFeedback.message}
+                </p>
+              ) : null}
               <p id="order-help" className="text-center text-[11px] leading-5 text-[var(--text-45)]">AYN publishes the first 4 digits. Your full order number is never retained.</p>
               {formError ? <p id="order-error" role="alert" className="error-message rounded-xl px-3 py-2 text-center text-xs font-bold">{formError}</p> : null}
             </form>
@@ -593,7 +686,7 @@ export function ThorTracker() {
           <div>
             <p className="text-sm font-black">A clear read of AYN’s public data.</p>
             <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-50)]">“Listed” means the first four digits appear inside a range AYN posted for the exact color and tier. It is not carrier tracking, delivery confirmation, or an ETA. Plain “Max” on AYN’s dashboard is treated as the 1TB queue; “Max (512)” remains separate.</p>
-            {sourceUpdatedAt ? <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-35)]">Source page updated {new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sourceUpdatedAt))}</p> : null}
+            {sourceUpdatedAt ? <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-35)]">Source page updated {formatSourceUpdatedAt(sourceUpdatedAt)}</p> : null}
           </div>
           <a href={SOURCE_PAGE_URL} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center justify-center rounded-full bg-[var(--ink)] px-5 text-xs font-black text-white transition hover:-translate-y-0.5">Open AYN dashboard ↗</a>
         </aside>

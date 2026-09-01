@@ -118,7 +118,10 @@ function parseVariant(sourceVariant: string): Pick<ShipmentEntry, 'color' | 'mod
 }
 
 export function parseShipmentDashboard(bodyHtml: string): ShipmentDay[] {
-  const paragraphs = [...bodyHtml.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)];
+  const paragraphPattern = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+  const paragraphs: RegExpExecArray[] = [];
+  let paragraphMatch: RegExpExecArray | null;
+  while ((paragraphMatch = paragraphPattern.exec(bodyHtml)) !== null) paragraphs.push(paragraphMatch);
   const days = new Map<string, ShipmentEntry[]>();
   const unparsedThorRows: string[] = [];
   let currentDate: string | null = null;
@@ -168,11 +171,13 @@ export function parseShipmentDashboard(bodyHtml: string): ShipmentDay[] {
 }
 
 export function entriesForVariant(days: ShipmentDay[], color: ThorColor, model: ModelId) {
-  return days.flatMap((day) =>
-    day.entries
-      .filter((entry) => entry.color === color && entry.model === model)
-      .map((entry) => ({ ...entry, date: day.date })),
-  );
+  const matches: Array<ShipmentEntry & { date: string }> = [];
+  for (const day of days) {
+    for (const entry of day.entries) {
+      if (entry.color === color && entry.model === model) matches.push({ ...entry, date: day.date });
+    }
+  }
+  return matches;
 }
 
 export function latestByVariant(days: ShipmentDay[]) {
@@ -191,7 +196,7 @@ export function evaluateWatch(days: ShipmentDay[], watch: ShipmentWatch): WatchS
   const entries = entriesForVariant(days, watch.color, watch.model);
   if (entries.length === 0) return { kind: 'no-data' };
 
-  const latest = entries.at(-1)!;
+  const latest = entries[entries.length - 1]!;
   const match = entries.find((entry) => watch.prefix >= entry.startPrefix && watch.prefix <= entry.endPrefix);
   if (match) return { kind: 'listed', match, date: match.date, latest };
 
@@ -260,7 +265,7 @@ export function predictShippingWindow(
     frontier.push({ date, endPrefix });
   }
 
-  const latestFrontier = frontier.at(-1);
+  const latestFrontier = frontier[frontier.length - 1];
   if (!latestFrontier || watch.prefix <= latestFrontier.endPrefix || frontier.length < 2) return null;
 
   const sourceDate = days.reduce((latest, day) => (day.date > latest ? day.date : latest), days[0].date);
@@ -288,7 +293,7 @@ export function predictShippingWindow(
   if (!Number.isFinite(ratePerDay) || ratePerDay <= 0) return null;
 
   const gap = watch.prefix - latestFrontier.endPrefix;
-  const observedMovement = training.at(-1)!.endPrefix - training[0].endPrefix;
+  const observedMovement = training[training.length - 1]!.endPrefix - training[0].endPrefix;
   if (observedMovement <= 0) return null;
 
   const projectedDays = Math.max(1, Math.ceil(gap / ratePerDay));
@@ -310,7 +315,7 @@ export function predictShippingWindow(
   const upperQuartile = quantile(pairwiseRates, 0.75);
   const spreadRatio = lowerQuartile > 0 ? upperQuartile / lowerQuartile : Number.POSITIVE_INFINITY;
   const intervalCount = training.slice(1).filter((point, index) => point.endPrefix > training[index].endPrefix).length;
-  const historySpanDays = daysBetween(training[0].date, training.at(-1)!.date);
+  const historySpanDays = daysBetween(training[0].date, training[training.length - 1]!.date);
   let confidence: ShippingForecast['confidence'] = intervalCount === 1 ? 'very-low' : 'low';
   if (
     training.length >= 4 &&

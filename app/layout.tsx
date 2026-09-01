@@ -5,16 +5,20 @@ const themeBootstrapScript = `
   (() => {
     const storageKey = 'thor-track.theme.v1';
     let theme = 'light';
+    let prefersDark = false;
+
+    try {
+      prefersDark = typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    } catch {}
 
     try {
       const storedTheme = window.localStorage.getItem(storageKey);
       theme = storedTheme === 'light' || storedTheme === 'dark'
         ? storedTheme
-        : window.matchMedia('(prefers-color-scheme: dark)').matches
-          ? 'dark'
-          : 'light';
+        : prefersDark ? 'dark' : 'light';
     } catch {
-      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      theme = prefersDark ? 'dark' : 'light';
     }
 
     document.documentElement.dataset.theme = theme;
