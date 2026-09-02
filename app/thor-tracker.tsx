@@ -6,15 +6,16 @@ import {
   FALLBACK_SHIPMENTS,
   MODELS,
   SOURCE_PAGE_URL,
-  entriesForVariant,
   evaluateWatch,
   latestByVariant,
   modelDisplay,
   predictShippingWindow,
   shortModelDisplay,
+  summarizeShipmentTrend,
   variantKey,
   type ModelId,
   type ShipmentDay,
+  type ShipmentTrendPoint,
   type ShipmentWatch,
   type ThorColor,
   type WatchStatus,
@@ -46,6 +47,26 @@ function formatDate(date: string, options?: Intl.DateTimeFormatOptions) {
 
 function formatRange(start: number, end: number) {
   return `${start}xx—${end}xx`;
+}
+
+function formatPace(value: number | null) {
+  if (value === null) return '—';
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatTrendChange(point: ShipmentTrendPoint, previous: ShipmentTrendPoint | undefined) {
+  if (point.deltaFromPrevious === null || !previous) return 'First recorded update; no prior comparison.';
+
+  const elapsedDays = point.daysFromPrevious ?? 0;
+  const elapsedCopy = `${elapsedDays} calendar ${elapsedDays === 1 ? 'day' : 'days'}`;
+  const previousDate = formatDate(previous.date, { year: undefined });
+  if (point.deltaFromPrevious > 0) {
+    return `+${point.deltaFromPrevious} prefix steps since ${previousDate} · ${elapsedCopy}.`;
+  }
+  if (point.deltaFromPrevious < 0) {
+    return `Down ${Math.abs(point.deltaFromPrevious)} prefix steps from the prior update on ${previousDate} · ${elapsedCopy}.`;
+  }
+  return `No endpoint change since ${previousDate} · ${elapsedCopy}.`;
 }
 
 function confidenceLabel(confidence: 'very-low' | 'low' | 'moderate') {
@@ -273,6 +294,7 @@ export function ThorTracker() {
   const [watchFeedback, setWatchFeedback] = useState<{ kind: 'saved' | 'session'; message: string } | null>(null);
   const [trendKeyOverride, setTrendKeyOverride] = useState<string | null>(null);
   const trendKey = trendKeyOverride ?? (watch ? variantKey(watch.color, watch.model) : variantKey('Black', 'base'));
+  const [trendSelection, setTrendSelection] = useState<{ trendKey: string; date: string } | null>(null);
   const [colorFilter, setColorFilter] = useState<ThorColor | 'All'>('All');
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [showAllTimeline, setShowAllTimeline] = useState(false);
@@ -347,16 +369,22 @@ export function ThorTracker() {
   );
 
   const [trendColor, trendModel] = trendKey.split(':') as [ThorColor, ModelId];
-  const trendSeries = useMemo(
-    () => entriesForVariant(days, trendColor, trendModel),
+  const trendSummary = useMemo(
+    () => summarizeShipmentTrend(days, trendColor, trendModel),
     [days, trendColor, trendModel],
   );
+  const trendSeries = trendSummary.points;
   const trendEnds = trendSeries.map((entry) => entry.endPrefix);
   const trendMin = trendEnds.length ? Math.min(...trendEnds) : 0;
   const trendMax = trendEnds.length ? Math.max(...trendEnds) : 0;
   const latestTrend = trendSeries[trendSeries.length - 1];
-  const previousTrend = trendSeries.length > 1 ? trendSeries[trendSeries.length - 2] : undefined;
-  const trendDelta = latestTrend && previousTrend ? latestTrend.endPrefix - previousTrend.endPrefix : null;
+  const requestedTrendDate = trendSelection?.trendKey === trendKey ? trendSelection.date : null;
+  const requestedTrendIndex = requestedTrendDate
+    ? trendSeries.findIndex((point) => point.date === requestedTrendDate)
+    : -1;
+  const selectedTrendIndex = requestedTrendIndex >= 0 ? requestedTrendIndex : trendSeries.length - 1;
+  const selectedTrend = selectedTrendIndex >= 0 ? trendSeries[selectedTrendIndex] : undefined;
+  const previousSelectedTrend = selectedTrendIndex > 0 ? trendSeries[selectedTrendIndex - 1] : undefined;
 
   const filteredTimeline = useMemo(() => {
     const [filterColor, filterModel] = timelineFilter.split(':') as [ThorColor, ModelId];
@@ -387,6 +415,7 @@ export function ThorTracker() {
     setOrderDraft(`${nextWatch.prefix}xx`);
     setFormError('');
     setTrendKeyOverride(variantKey(color, model));
+    setTrendSelection(null);
     setWatchFeedback({
       kind: persisted ? 'saved' : 'session',
       message: persisted
@@ -584,38 +613,108 @@ export function ThorTracker() {
         </section>
 
         <section className="mt-20 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]" aria-labelledby="trend-title">
-          <div className="rounded-[28px] bg-[var(--ink)] p-6 text-white sm:p-8">
+          <div className="min-w-0 rounded-[28px] bg-[var(--ink)] p-6 text-white sm:p-8">
             <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/40">Configuration trend</p>
             <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h2 id="trend-title" className="text-3xl font-black tracking-[-0.045em]">{trendColor} · {shortModelDisplay(trendModel)}</h2>
                 {latestTrend ? <p className="mt-2 text-sm text-white/50">Latest endpoint <span className="font-mono font-bold text-[var(--volt)]">{latestTrend.endPrefix}xx</span></p> : null}
               </div>
-              <select value={trendKey} onChange={(event) => setTrendKeyOverride(event.target.value)} aria-label="Choose configuration trend" className="h-11 rounded-xl border border-white/15 bg-white/10 px-3 text-xs font-bold text-white outline-none focus:border-[var(--volt)]">
+              <select
+                value={trendKey}
+                onChange={(event) => {
+                  setTrendKeyOverride(event.target.value);
+                  setTrendSelection(null);
+                }}
+                aria-label="Choose configuration trend"
+                className="h-11 rounded-xl border border-white/15 bg-white/10 px-3 text-xs font-bold text-white outline-none focus:border-[var(--volt)]"
+              >
                 {latestVariants.map((item) => <option className="text-[var(--option-text)]" value={variantKey(item.color, item.model)} key={variantKey(item.color, item.model)}>{item.color} · {modelDisplay(item.model)}</option>)}
               </select>
             </div>
 
-            <div className="mt-9 flex h-56 items-end gap-2 border-b border-white/15 px-1" role="img" aria-label={`Published endpoint trend for ${trendColor} ${modelDisplay(trendModel)}`}>
-              {trendSeries.map((point) => {
-                const spread = trendMax - trendMin;
-                const height = spread === 0 ? 72 : 28 + ((point.endPrefix - trendMin) / spread) * 68;
-                return (
-                  <div key={`${point.date}-${point.startPrefix}`} className="group flex h-full min-w-0 flex-1 flex-col justify-end" title={`${formatDate(point.date)}: ${formatRange(point.startPrefix, point.endPrefix)}`}>
-                    <span className="mb-2 hidden text-center font-mono text-[9px] font-bold text-white/45 group-hover:block sm:block">{point.endPrefix}</span>
-                    <span className="block min-h-4 w-full rounded-t-lg bg-[var(--volt)]/80 transition group-hover:bg-[var(--volt)]" style={{ height: `${height}%` }} />
-                    <span className="my-2 block text-center text-[9px] font-bold text-white/35">{formatDate(point.date, { month: 'numeric', day: 'numeric', year: undefined })}</span>
-                  </div>
-                );
-              })}
+            <div className="mt-7 grid grid-cols-3 gap-2" aria-label="Observed configuration pace">
+              {[
+                { label: 'Avg / day', value: trendSummary.averagePerDay },
+                { label: 'Avg / 7 days', value: trendSummary.averagePer7Days },
+                { label: 'Avg / 30 days', value: trendSummary.averagePer30Days },
+              ].map((stat) => (
+                <div key={stat.label} className="rounded-2xl bg-white/[0.06] px-2 py-3 text-center">
+                  <p className="text-[10px] font-black uppercase tracking-[0.08em] text-white/45">{stat.label}</p>
+                  <p className="mt-2 font-mono text-xl font-bold tracking-[-0.04em] text-[var(--volt)] sm:text-2xl">{formatPace(stat.value)}</p>
+                  <p className="mt-1 text-[10px] font-bold text-white/40">prefix steps</p>
+                </div>
+              ))}
             </div>
-            <div className="mt-4 flex items-center justify-between gap-5 text-xs text-white/45">
-              <span>Published range endpoint by update</span>
-              {trendDelta !== null ? <span className="font-bold text-white/70">{trendDelta >= 0 ? '+' : ''}{trendDelta} since prior update</span> : <span>First update</span>}
+            <p className="mt-3 text-center text-[10px] font-bold leading-4 text-white/40">
+              {trendSummary.updateCount === 0
+                ? 'No observed updates for this configuration.'
+                : trendSummary.updateCount === 1
+                  ? '1 observed update · More history is needed for a pace.'
+                  : `${trendSummary.updateCount} updates across ${trendSummary.spanDays} calendar ${trendSummary.spanDays === 1 ? 'day' : 'days'} · +${trendSummary.totalAdvance} prefix ${trendSummary.totalAdvance === 1 ? 'step' : 'steps'}`}
+            </p>
+
+            <figure className="mt-7" aria-describedby="trend-chart-summary">
+              <figcaption className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/45">
+                <span>Published range endpoint by update</span>
+                <span>Select a bar for details</span>
+              </figcaption>
+              <p id="trend-chart-summary" className="sr-only">
+                {`Observed endpoint trend for ${trendColor} ${modelDisplay(trendModel)}, with ${trendSummary.updateCount} published ${trendSummary.updateCount === 1 ? 'update' : 'updates'}.`}
+              </p>
+              <div className="overflow-x-auto pb-1">
+                <div className="flex h-56 min-w-full items-end gap-2 border-b border-white/15 px-1">
+                  {trendSeries.map((point, index) => {
+                    const spread = trendMax - trendMin;
+                    const height = spread === 0 ? 72 : 28 + ((point.endPrefix - trendMin) / spread) * 68;
+                    const isSelected = selectedTrend?.date === point.date;
+                    const changeCopy = formatTrendChange(point, trendSeries[index - 1]);
+                    return (
+                      <button
+                        key={`${point.date}-${point.startPrefix}-${point.endPrefix}`}
+                        type="button"
+                        onClick={() => setTrendSelection({ trendKey, date: point.date })}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Enter' && event.key !== ' ') return;
+                          event.preventDefault();
+                          setTrendSelection({ trendKey, date: point.date });
+                        }}
+                        aria-pressed={isSelected}
+                        aria-label={`${formatDate(point.date)}. Published range ${formatRange(point.startPrefix, point.endPrefix)}; endpoint ${point.endPrefix}xx. ${changeCopy}`}
+                        className={`group flex h-full min-w-11 flex-1 flex-col justify-end rounded-t-lg px-0.5 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--volt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ink)] ${isSelected ? 'bg-white/[0.08]' : 'hover:bg-white/[0.04]'}`}
+                      >
+                        <span className={`mb-2 hidden text-center font-mono text-[10px] font-bold sm:block ${isSelected ? 'text-white' : 'text-white/45'}`}>{point.endPrefix}</span>
+                        <span
+                          aria-hidden="true"
+                          className={`block min-h-4 w-full rounded-t-lg transition ${isSelected ? 'bg-[var(--volt)] ring-2 ring-white/70 ring-offset-2 ring-offset-[var(--ink)]' : 'bg-[var(--volt)]/70 group-hover:bg-[var(--volt)]'}`}
+                          style={{ height: `${height}%` }}
+                        />
+                        <span className={`my-2 block text-center text-[11px] font-bold ${isSelected ? 'text-white' : 'text-white/40'}`}>{formatDate(point.date, { month: 'numeric', day: 'numeric', year: undefined })}</span>
+                      </button>
+                    );
+                  })}
+                  {trendSeries.length === 0 ? <p className="m-auto text-sm text-white/50">No published updates yet.</p> : null}
+                </div>
+              </div>
+            </figure>
+
+            <div className="mt-4 min-h-16 border-t border-white/10 pt-4" role="status" aria-live="polite" aria-atomic="true">
+              {selectedTrend ? (
+                <>
+                  <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-white/75">
+                    <span>{formatDate(selectedTrend.date)}</span>
+                    <span className="font-mono text-[var(--volt)]">{formatRange(selectedTrend.startPrefix, selectedTrend.endPrefix)}</span>
+                    <span>Endpoint {selectedTrend.endPrefix}xx</span>
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-white/50">{formatTrendChange(selectedTrend, previousSelectedTrend)}</p>
+                </>
+              ) : (
+                <p className="text-xs text-white/50">No published update is available to compare.</p>
+              )}
             </div>
           </div>
 
-          <div className="rounded-[28px] border border-[var(--line)] bg-[var(--surface-soft)] p-6 sm:p-8">
+          <div className="min-w-0 rounded-[28px] border border-[var(--line)] bg-[var(--surface-soft)] p-6 sm:p-8">
             <div className="flex flex-wrap items-end justify-between gap-5">
               <div>
                 <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-40)]">Latest by configuration</p>
