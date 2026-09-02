@@ -52,6 +52,23 @@ export type ShippingForecast = {
   confidence: 'very-low' | 'low' | 'moderate';
 };
 
+export type ShipmentTrendPoint = ShipmentEntry & {
+  date: string;
+  deltaFromPrevious: number | null;
+  daysFromPrevious: number | null;
+  frontierIncrease: number;
+};
+
+export type ShipmentTrendSummary = {
+  points: ShipmentTrendPoint[];
+  updateCount: number;
+  spanDays: number;
+  totalAdvance: number;
+  averagePerDay: number | null;
+  averagePer7Days: number | null;
+  averagePer30Days: number | null;
+};
+
 export const variantKey = (color: ThorColor, model: ModelId) => `${color}:${model}`;
 
 export function modelDisplay(model: ModelId) {
@@ -213,6 +230,64 @@ function dateValue(date: string) {
 
 function daysBetween(start: string, end: string) {
   return Math.round((dateValue(end) - dateValue(start)) / DAY_IN_MS);
+}
+
+export function summarizeShipmentTrend(
+  days: ShipmentDay[],
+  color: ThorColor,
+  model: ModelId,
+): ShipmentTrendSummary {
+  const entriesByDate = new Map<string, ShipmentEntry>();
+
+  for (const day of days) {
+    for (const entry of day.entries) {
+      if (entry.color !== color || entry.model !== model) continue;
+
+      const existing = entriesByDate.get(day.date);
+      if (
+        !existing ||
+        entry.endPrefix > existing.endPrefix ||
+        (entry.endPrefix === existing.endPrefix && entry.startPrefix < existing.startPrefix)
+      ) {
+        entriesByDate.set(day.date, entry);
+      }
+    }
+  }
+
+  const normalized = [...entriesByDate.entries()]
+    .map(([date, entry]) => ({ ...entry, date }))
+    .sort((left, right) => left.date.localeCompare(right.date));
+
+  let frontier = normalized[0]?.endPrefix ?? 0;
+  const points = normalized.map((entry, index): ShipmentTrendPoint => {
+    const previous = normalized[index - 1];
+    const frontierIncrease = index === 0 ? 0 : Math.max(0, entry.endPrefix - frontier);
+    frontier = Math.max(frontier, entry.endPrefix);
+
+    return {
+      ...entry,
+      deltaFromPrevious: previous ? entry.endPrefix - previous.endPrefix : null,
+      daysFromPrevious: previous ? daysBetween(previous.date, entry.date) : null,
+      frontierIncrease,
+    };
+  });
+
+  const updateCount = points.length;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const spanDays = firstPoint && lastPoint ? daysBetween(firstPoint.date, lastPoint.date) : 0;
+  const totalAdvance = points.reduce((total, point) => total + point.frontierIncrease, 0);
+  const averagePerDay = updateCount >= 2 && spanDays > 0 ? totalAdvance / spanDays : null;
+
+  return {
+    points,
+    updateCount,
+    spanDays,
+    totalAdvance,
+    averagePerDay,
+    averagePer7Days: averagePerDay === null ? null : averagePerDay * 7,
+    averagePer30Days: averagePerDay === null ? null : averagePerDay * 30,
+  };
 }
 
 function addDays(date: string, amount: number) {
