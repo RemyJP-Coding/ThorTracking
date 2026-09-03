@@ -17,7 +17,8 @@ Thor Track is an unofficial community utility that turns AYN's public shipment d
 - **Keep configurations separate.** Every color and model has its own queue, including separate Max 512GB and Max 1TB ranges.
 - **Understand the result.** Thor Track distinguishes orders that are listed, still ahead of the frontier, not explicitly included in a posted range, or waiting on their first configuration update.
 - **Explore shipment movement.** Compare the latest range for every configuration, inspect pace statistics, and browse the historical dispatch timeline.
-- **Refresh with confidence.** The app checks AYN on load, every ten minutes while open, and when a stale tab becomes active again. A manual Refresh button always shows the outcome.
+- **Keep the full history.** Every successful scrape is merged into a shared archive, so older update days remain available even if AYN’s page becomes a moving window.
+- **Refresh with confidence.** The app checks AYN on load, every ten minutes while open, and when a stale tab becomes active again. If AYN is unavailable, it serves the saved archive instead. After an online visit, the app shell and public timeline are also available to that browser while offline.
 - **Use it comfortably anywhere.** The interface is responsive, keyboard-friendly, and includes a persistent light/dark theme toggle.
 
 ## How it works
@@ -27,7 +28,7 @@ Thor Track is an unofficial community utility that turns AYN's public shipment d
 3. Select **Watch this order**.
 4. Read the result, then use the trend chart and timeline for more context.
 
-Your saved watch stays in that browser. There is no account, server-side watch list, background monitoring, or notification service. If browser storage is blocked, Thor Track keeps the watch for the current tab and tells you that it may not survive after the tab closes.
+Your saved watch stays in that browser. There is no account, server-side watch list, background monitoring, or notification service. The shared database contains only AYN’s public shipment ranges and scrape timestamps—never order watches. If browser storage is blocked, Thor Track keeps the watch for the current tab and tells you that it may not survive after the tab closes.
 
 ### Understanding watch statuses
 
@@ -53,9 +54,10 @@ This predicts when a prefix may appear on AYN's shipment dashboard. It is **not*
 ## Data and privacy
 
 - Shipment ranges come from the [official AYN shipment dashboard](https://www.ayntec.com/pages/shipment-dashboard).
-- The app stores only the four-digit order prefix, chosen configuration, and theme preference in browser storage.
+- A shared D1 archive stores public shipment ranges and source timestamps. New scrapes update dates still present on AYN’s page without deleting older dates that have fallen out of its window.
+- The browser stores the four-digit order prefix, chosen configuration, theme preference, and a cached copy of the public timeline for connection failures. A service worker caches the app shell after an online visit so that copy can still be displayed offline.
 - The full order number is never retained or sent to the shipment endpoint, and the project has no user-account database.
-- If a refresh fails, the interface marks live data as unavailable and keeps the last successfully loaded timeline. On an initial failure, it uses its clearly labeled bundled fallback.
+- If AYN cannot be reached, the API serves the shared archive. If the tracker API cannot be reached, the browser serves its last saved copy. A clearly labeled bundled history remains the final fallback.
 - Plain **Max** on AYN's dashboard is treated as the **1TB** queue; **Max (512)** remains a separate 512GB queue.
 
 ## Run locally
@@ -71,18 +73,21 @@ This predicts when a prefix may appear on AYN's shipment dashboard. It is **not*
 git clone https://github.com/RemyJP-Coding/ThorTracking.git
 cd ThorTracking
 npm ci
+npm run db:migrate:local
 npm run dev
 ```
 
 Open the local URL printed in the terminal.
 
-No environment variables or external database are required for local development. The server route requests AYN's public feed at runtime; if that request fails, the app remains usable with its clearly labeled last-known data.
+No environment variables are required for local development. The migration command creates the project-local D1 archive used by the development server. The server route requests AYN's public feed at runtime and adds each successful result to that archive.
 
 ## Useful commands
 
 | Command | Purpose |
 | --- | --- |
 | `npm run dev` | Start the local Vinext development server. |
+| `npm run db:generate` | Generate a new D1 migration after an intentional schema change. |
+| `npm run db:migrate:local` | Apply pending migrations to the project-local D1 database. |
 | `npm test` | Run shipment forecasting, trend, storage, and API-route tests. |
 | `npm run lint` | Check the TypeScript and React source with ESLint. |
 | `npm run build` | Create a production build. |
@@ -110,14 +115,19 @@ Confirm the first four digits, color, and model. Every configuration is evaluate
 
 ```text
 app/
-├── api/shipments/route.ts  # Same-origin bridge to AYN's public data
+├── api/shipments/route.ts  # Live scrape with shared-archive fallback
+├── lib/shipment-archive.ts # Append-only D1 shipment history
+├── lib/shipment-cache.ts   # Validated browser fallback cache
 ├── lib/shipments.ts        # Parsing, status, trend, and forecast logic
 ├── lib/watch-storage.ts    # Safe browser-local watch persistence
 ├── thor-tracker.tsx        # Main responsive tracker interface
 ├── globals.css             # Theme and presentation styles
 └── layout.tsx              # Metadata and early theme setup
 tests/                      # Node test suite
+db/schema.ts                # Drizzle definition for the D1 archive
+drizzle/                    # Generated, append-only schema migrations
 public/og.png               # Social and README artwork
+public/sw.js                # Offline app-shell and API-response cache
 ```
 
 The app uses React 19, Next.js 16 App Router conventions, TypeScript, Tailwind CSS 4, Vinext, Vite, OpenAI Sites tooling, and a Cloudflare-compatible runtime.

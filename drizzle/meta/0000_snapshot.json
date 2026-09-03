@@ -1,0 +1,178 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "d7779fb9-5202-4c40-8274-213d6f80bfd1",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "tables": {
+    "shipment_archive_state": {
+      "name": "shipment_archive_state",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_successful_at": {
+          "name": "last_successful_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_updated_at": {
+          "name": "source_updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_first_date": {
+          "name": "source_first_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_last_date": {
+          "name": "source_last_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_entry_count": {
+          "name": "source_entry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "shipment_archive_state_singleton_check": {
+          "name": "shipment_archive_state_singleton_check",
+          "value": "\"shipment_archive_state\".\"id\" = 1"
+        },
+        "shipment_archive_state_entry_count_check": {
+          "name": "shipment_archive_state_entry_count_check",
+          "value": "\"shipment_archive_state\".\"source_entry_count\" >= 0"
+        }
+      }
+    },
+    "shipment_entries": {
+      "name": "shipment_entries",
+      "columns": {
+        "shipment_date": {
+          "name": "shipment_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "color": {
+          "name": "color",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_variant": {
+          "name": "source_variant",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "start_prefix": {
+          "name": "start_prefix",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "end_prefix": {
+          "name": "end_prefix",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "first_seen_at": {
+          "name": "first_seen_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_shipment_entries_date_seen": {
+          "name": "idx_shipment_entries_date_seen",
+          "columns": [
+            "shipment_date",
+            "last_seen_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shipment_entries_pk": {
+          "columns": [
+            "shipment_date",
+            "color",
+            "model",
+            "start_prefix",
+            "end_prefix"
+          ],
+          "name": "shipment_entries_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "shipment_entries_color_check": {
+          "name": "shipment_entries_color_check",
+          "value": "\"shipment_entries\".\"color\" in ('Black', 'White', 'Rainbow', 'Clear Purple')"
+        },
+        "shipment_entries_model_check": {
+          "name": "shipment_entries_model_check",
+          "value": "\"shipment_entries\".\"model\" in ('lite', 'base', 'pro', 'max-512', 'max-1tb')"
+        },
+        "shipment_entries_prefix_check": {
+          "name": "shipment_entries_prefix_check",
+          "value": "\"shipment_entries\".\"start_prefix\" between 1000 and 9999 and \"shipment_entries\".\"end_prefix\" between \"shipment_entries\".\"start_prefix\" and 9999"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}

@@ -67,7 +67,10 @@ test('same-origin shipment route returns parsed data instead of raw HTML', async
     const payload = await response.json();
     assert.equal(response.status, 200);
     assert.equal(payload.status, 'live');
-    assert.equal(payload.days[0].entries[0].endPrefix, 2516);
+    assert.equal(
+      payload.days.find((day) => day.date === '2026-08-27').entries[0].endPrefix,
+      2516,
+    );
     assert.equal('body_html' in payload, false);
   } finally {
     globalThis.fetch = originalFetch;

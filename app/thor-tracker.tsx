@@ -8,6 +8,7 @@ import {
   SOURCE_PAGE_URL,
   evaluateWatch,
   latestByVariant,
+  mergeShipmentDays,
   modelDisplay,
   predictShippingWindow,
   shortModelDisplay,
@@ -20,16 +21,24 @@ import {
   type ThorColor,
   type WatchStatus,
 } from './lib/shipments';
-import { readWatchSnapshot, writeWatchSnapshot, type WatchStorage } from './lib/watch-storage';
+import { isShipmentHistory, readShipmentCache, writeShipmentCache } from './lib/shipment-cache';
+import { readWatchSnapshot, writeWatchSnapshot } from './lib/watch-storage';
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const CLIENT_REFRESH_TIMEOUT_MS = 15_000;
 const WATCH_CHANGE_EVENT = 'thor-track-watch-change';
 const THEME_STORAGE_KEY = 'thor-track.theme.v1';
 const THEME_CHANGE_EVENT = 'thor-track-theme-change';
 const SHIPMENTS_API_URL = '/api/shipments';
 
-type SourceState = 'checking' | 'live' | 'fallback';
+type SourceState = 'checking' | 'live' | 'archive' | 'fallback';
 type Theme = 'light' | 'dark';
+
+type ShipmentFeedHistory = {
+  persisted?: boolean;
+  retainedDayCount?: number;
+  totalDayCount?: number;
+};
 
 function formatDate(date: string, options?: Intl.DateTimeFormatOptions) {
   try {
@@ -129,7 +138,7 @@ function subscribeToStoredWatch(onStoreChange: () => void) {
 
 let volatileWatchSnapshot = '';
 
-function getBrowserStorage(): WatchStorage | null {
+function getBrowserStorage(): Storage | null {
   try {
     return window.localStorage;
   } catch {
@@ -277,6 +286,10 @@ export function ThorTracker() {
   const [refreshNotice, setRefreshNotice] = useState('Connecting to AYN…');
   const [refreshing, setRefreshing] = useState(false);
   const lastAttemptRef = useRef(0);
+  const refreshSequenceRef = useRef(0);
+  const activeRefreshRef = useRef<{ id: number; controller: AbortController } | null>(null);
+  const hasLoadedHistoryRef = useRef(false);
+  const latestHistoryDateRef = useRef(FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date ?? '');
 
   const storedWatchSnapshot = useSyncExternalStore(
     subscribeToStoredWatch,
@@ -299,7 +312,23 @@ export function ThorTracker() {
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [showAllTimeline, setShowAllTimeline] = useState(false);
 
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production') return;
+    if (!('serviceWorker' in navigator)) return;
+    void navigator.serviceWorker.register('/sw.js').catch(() => {
+      // The live app and browser data cache still work when registration is blocked.
+    });
+  }, []);
+
   const refreshData = useCallback(async (manual = false) => {
+    if (activeRefreshRef.current && !manual) return;
+    if (activeRefreshRef.current) activeRefreshRef.current.controller.abort();
+
+    const id = refreshSequenceRef.current + 1;
+    refreshSequenceRef.current = id;
+    const controller = new AbortController();
+    activeRefreshRef.current = { id, controller };
+    const clientTimeout = window.setTimeout(() => controller.abort(), CLIENT_REFRESH_TIMEOUT_MS);
     setRefreshing(true);
     setSourceState('checking');
     if (manual) setRefreshNotice('Checking AYN for the latest shipment ranges…');
@@ -309,35 +338,105 @@ export function ThorTracker() {
       const response = await fetch(SHIPMENTS_API_URL, {
         cache: 'no-store',
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error(`Shipment feed returned ${response.status}`);
+      const servedFromDeviceCache = response.headers.get('X-Thor-Track-Offline') === '1';
       const payload = (await response.json()) as {
         status?: string;
         checkedAt?: string;
         sourceUpdatedAt?: string | null;
+        history?: ShipmentFeedHistory;
         days?: ShipmentDay[];
       };
-      if (payload.status !== 'live' || !Array.isArray(payload.days) || payload.days.length === 0) {
+      if (
+        (payload.status !== 'live' && payload.status !== 'archived') ||
+        !isShipmentHistory(payload.days)
+      ) {
         throw new Error('Shipment feed payload was invalid');
       }
+      if (refreshSequenceRef.current !== id) return;
+
+      const sourceUpdatedAt = payload.sourceUpdatedAt ?? null;
+      const savedOnDevice = writeShipmentCache(getBrowserStorage(), {
+        savedAt: payload.checkedAt ?? attemptedAt,
+        sourceUpdatedAt,
+        days: payload.days,
+      });
       setDays(payload.days);
-      setSourceUpdatedAt(payload.sourceUpdatedAt ?? null);
+      setSourceUpdatedAt(sourceUpdatedAt);
+      hasLoadedHistoryRef.current = true;
+      latestHistoryDateRef.current = payload.days[payload.days.length - 1]?.date ?? '';
       const checkedAt = payload.checkedAt ?? attemptedAt;
-      setSourceState('live');
-      setRefreshNotice(`Live AYN data checked at ${formatCheckedAt(checkedAt)}.`);
+      if (payload.status === 'live' && !servedFromDeviceCache) {
+        setSourceState('live');
+        const retainedDays = Math.max(0, payload.history?.retainedDayCount ?? 0);
+        const archiveCopy = payload.history?.persisted
+          ? retainedDays > 0
+            ? ` ${retainedDays} earlier update ${retainedDays === 1 ? 'day is' : 'days are'} retained in the archive.`
+            : ' Shipment history is saved in the archive.'
+          : savedOnDevice
+            ? ' This device saved a copy.'
+            : ' History storage is currently unavailable.';
+        setRefreshNotice(`Live AYN data checked at ${formatCheckedAt(checkedAt)}.${archiveCopy}`);
+      } else {
+        setSourceState('archive');
+        const archiveDate = payload.days[payload.days.length - 1]?.date;
+        setRefreshNotice(
+          servedFromDeviceCache
+            ? `The tracker is offline. Showing this device’s saved history${archiveDate ? ` through ${formatDate(archiveDate)}` : ''}.`
+            : `AYN is unavailable as of ${formatCheckedAt(checkedAt)}. Showing saved history${archiveDate ? ` through ${formatDate(archiveDate)}` : ''}.`,
+        );
+      }
     } catch {
-      setSourceState('fallback');
-      const fallbackDate = FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date;
-      setRefreshNotice(
-        `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing last-known data${fallbackDate ? ` through ${formatDate(fallbackDate)}` : ''}.`,
-      );
+      if (refreshSequenceRef.current !== id) return;
+      const cached = readShipmentCache(getBrowserStorage());
+      if (cached) {
+        const cachedDays = mergeShipmentDays(FALLBACK_SHIPMENTS, cached.days);
+        setDays(cachedDays);
+        setSourceUpdatedAt(cached.sourceUpdatedAt);
+        hasLoadedHistoryRef.current = true;
+        latestHistoryDateRef.current = cachedDays[cachedDays.length - 1]?.date ?? '';
+        setSourceState('archive');
+        setRefreshNotice(
+          `The tracker could not be reached at ${formatCheckedAt(attemptedAt)}. Showing this device’s saved history through ${formatDate(latestHistoryDateRef.current)}.`,
+        );
+      } else if (hasLoadedHistoryRef.current) {
+        setSourceState('archive');
+        setRefreshNotice(
+          `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing the history already loaded${latestHistoryDateRef.current ? ` through ${formatDate(latestHistoryDateRef.current)}` : ''}.`,
+        );
+      } else {
+        setSourceState('fallback');
+        const fallbackDate = FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date;
+        setRefreshNotice(
+          `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing bundled history${fallbackDate ? ` through ${formatDate(fallbackDate)}` : ''}.`,
+        );
+      }
     } finally {
-      setRefreshing(false);
+      window.clearTimeout(clientTimeout);
+      if (refreshSequenceRef.current === id) {
+        activeRefreshRef.current = null;
+        setRefreshing(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    const initialRefresh = window.setTimeout(() => void refreshData(), 0);
+    const initialRefresh = window.setTimeout(() => {
+      const cached = readShipmentCache(getBrowserStorage());
+      if (cached) {
+        const cachedDays = mergeShipmentDays(FALLBACK_SHIPMENTS, cached.days);
+        setDays(cachedDays);
+        setSourceUpdatedAt(cached.sourceUpdatedAt);
+        hasLoadedHistoryRef.current = true;
+        latestHistoryDateRef.current = cachedDays[cachedDays.length - 1]?.date ?? '';
+        setRefreshNotice(
+          `Showing this device’s saved history through ${formatDate(latestHistoryDateRef.current)} while checking AYN…`,
+        );
+      }
+      void refreshData();
+    }, 0);
     const interval = window.setInterval(() => void refreshData(), REFRESH_INTERVAL_MS);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastAttemptRef.current >= REFRESH_INTERVAL_MS) {
@@ -351,6 +450,8 @@ export function ThorTracker() {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       window.removeEventListener('focus', refreshWhenVisible);
+      activeRefreshRef.current?.controller.abort();
+      refreshSequenceRef.current += 1;
     };
   }, [refreshData]);
 
@@ -470,7 +571,7 @@ export function ThorTracker() {
               className="flex min-h-11 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] disabled:cursor-wait"
               aria-label="Refresh AYN shipment data"
             >
-              <span className={`h-2 w-2 rounded-full ${sourceState === 'live' ? 'bg-[#35a853]' : sourceState === 'checking' ? 'bg-[#e2a42d]' : 'bg-[#d26345]'}`} />
+              <span className={`h-2 w-2 rounded-full ${sourceState === 'live' ? 'bg-[#35a853]' : sourceState === 'checking' ? 'bg-[#e2a42d]' : sourceState === 'archive' ? 'bg-[#4d8fd8]' : 'bg-[#d26345]'}`} />
               {refreshing ? 'Checking…' : 'Refresh'}
             </button>
           </div>
@@ -492,6 +593,7 @@ export function ThorTracker() {
             <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-xs font-bold text-[var(--text-45)]">
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Checks every 10 minutes while open</span>
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Only a masked prefix is saved</span>
+              <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Older shipment history is retained</span>
             </div>
           </div>
 
@@ -784,7 +886,7 @@ export function ThorTracker() {
         <aside className="mt-20 grid gap-5 rounded-[28px] border border-[var(--line)] bg-[var(--surface-muted)] p-6 sm:grid-cols-[1fr_auto] sm:items-center sm:p-8" aria-label="About this tracker">
           <div>
             <p className="text-sm font-black">A clear read of AYN’s public data.</p>
-            <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-50)]">“Listed” means the first four digits appear inside a range AYN posted for the exact color and tier. It is not carrier tracking, delivery confirmation, or an ETA. Plain “Max” on AYN’s dashboard is treated as the 1TB queue; “Max (512)” remains separate.</p>
+            <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-50)]">“Listed” means the first four digits appear inside a range AYN posted for the exact color and tier. It is not carrier tracking, delivery confirmation, or an ETA. Older update days remain in Thor Track’s public archive if AYN later removes them from its page. Plain “Max” on AYN’s dashboard is treated as the 1TB queue; “Max (512)” remains separate.</p>
             {sourceUpdatedAt ? <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-35)]">Source page updated {formatSourceUpdatedAt(sourceUpdatedAt)}</p> : null}
           </div>
           <a href={SOURCE_PAGE_URL} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center justify-center rounded-full bg-[var(--ink)] px-5 text-xs font-black text-white transition hover:-translate-y-0.5">Open AYN dashboard ↗</a>
@@ -794,7 +896,7 @@ export function ThorTracker() {
       <footer className="border-t border-[var(--line)]">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-7 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--text-35)] sm:px-8 lg:px-10">
           <span>Thor Track · Unofficial community utility</span>
-          <span>Local watch · Live public source</span>
+          <span>Local watch · Saved public history</span>
         </div>
       </footer>
     </main>

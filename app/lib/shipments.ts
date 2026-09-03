@@ -187,6 +187,21 @@ export function parseShipmentDashboard(bodyHtml: string): ShipmentDay[] {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+export function mergeShipmentDays(...histories: ShipmentDay[][]): ShipmentDay[] {
+  const days = new Map<string, ShipmentDay>();
+
+  for (const history of histories) {
+    for (const day of history) {
+      days.set(day.date, {
+        date: day.date,
+        entries: day.entries.map((entry) => ({ ...entry })),
+      });
+    }
+  }
+
+  return [...days.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
 export function entriesForVariant(days: ShipmentDay[], color: ThorColor, model: ModelId) {
   const matches: Array<ShipmentEntry & { date: string }> = [];
   for (const day of days) {
