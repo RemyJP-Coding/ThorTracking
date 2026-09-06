@@ -6,11 +6,9 @@ import {
   FALLBACK_SHIPMENTS,
   MODELS,
   SOURCE_PAGE_URL,
-  evaluateWatch,
   latestByVariant,
-  mergeShipmentDays,
   modelDisplay,
-  predictShippingWindow,
+  localCalendarDate,
   shortModelDisplay,
   summarizeShipmentTrend,
   variantKey,
@@ -19,10 +17,13 @@ import {
   type ShipmentTrendPoint,
   type ShipmentWatch,
   type ThorColor,
-  type WatchStatus,
 } from './lib/shipments';
 import { isShipmentHistory, readShipmentCache, writeShipmentCache } from './lib/shipment-cache';
 import { readWatchSnapshot, writeWatchSnapshot } from './lib/watch-storage';
+import { cacheObservation, isOlderObservation, isWatch, readExperience, watchIdentity, type Observation } from './lib/experience';
+import { normalizeSnapshotDays } from './lib/shipment-comparison';
+import { useExperience } from './lib/use-experience';
+import { PersonalDashboard } from './personal-dashboard';
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const CLIENT_REFRESH_TIMEOUT_MS = 15_000;
@@ -78,12 +79,6 @@ function formatTrendChange(point: ShipmentTrendPoint, previous: ShipmentTrendPoi
   return `No endpoint change since ${previousDate} · ${elapsedCopy}.`;
 }
 
-function confidenceLabel(confidence: 'very-low' | 'low' | 'moderate') {
-  if (confidence === 'very-low') return 'Very low confidence';
-  if (confidence === 'moderate') return 'Moderate confidence';
-  return 'Low confidence';
-}
-
 function formatCheckedAt(value: string | null) {
   if (!value) return 'Connecting';
   try {
@@ -108,35 +103,26 @@ function formatSourceUpdatedAt(value: string) {
 }
 
 function safeStoredWatch(value: string | null): ShipmentWatch | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as Partial<ShipmentWatch>;
-    const modelIds = MODELS.map((model) => model.id as string);
-    if (
-      typeof parsed.prefix === 'number' &&
-      parsed.prefix >= 1000 &&
-      parsed.prefix <= 9999 &&
-      COLORS.includes(parsed.color as ThorColor) &&
-      modelIds.includes(parsed.model as string)
-    ) {
-      return parsed as ShipmentWatch;
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  try { const parsed: unknown = value ? JSON.parse(value) : null; return isWatch(parsed) ? parsed : null; }
+  catch { return null; }
 }
 
 function subscribeToStoredWatch(onStoreChange: () => void) {
-  window.addEventListener('storage', onStoreChange);
+  const changed = (event: StorageEvent) => {
+    if (event.key !== null && event.key !== 'thor-track.watch.v1') return;
+    volatileWatchOnly = false;
+    onStoreChange();
+  };
+  window.addEventListener('storage', changed);
   window.addEventListener(WATCH_CHANGE_EVENT, onStoreChange);
   return () => {
-    window.removeEventListener('storage', onStoreChange);
+    window.removeEventListener('storage', changed);
     window.removeEventListener(WATCH_CHANGE_EVENT, onStoreChange);
   };
 }
 
 let volatileWatchSnapshot = '';
+let volatileWatchOnly = false;
 
 function getBrowserStorage(): Storage | null {
   try {
@@ -147,6 +133,7 @@ function getBrowserStorage(): Storage | null {
 }
 
 function getStoredWatchSnapshot() {
+  if (volatileWatchOnly) return volatileWatchSnapshot;
   const result = readWatchSnapshot(getBrowserStorage(), volatileWatchSnapshot);
   if (result.available) volatileWatchSnapshot = result.snapshot;
   return result.snapshot;
@@ -159,6 +146,7 @@ function getServerWatchSnapshot() {
 function writeStoredWatch(watch: ShipmentWatch | null) {
   const result = writeWatchSnapshot(getBrowserStorage(), watch);
   volatileWatchSnapshot = result.snapshot;
+  volatileWatchOnly = !result.persisted;
   window.dispatchEvent(new Event(WATCH_CHANGE_EVENT));
   return result.persisted;
 }
@@ -245,39 +233,6 @@ function writeTheme(theme: Theme) {
   window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
 }
 
-function statusCopy(status: WatchStatus) {
-  if (status.kind === 'listed') {
-    return {
-      eyebrow: 'Listed by AYN',
-      title: `Your prefix appears in the ${formatDate(status.date)} batch.`,
-      body: `AYN published ${formatRange(status.match.startPrefix, status.match.endPrefix)} for this exact configuration.`,
-      tone: 'listed',
-    } as const;
-  }
-  if (status.kind === 'watching') {
-    return {
-      eyebrow: 'Watching',
-      title: `${status.distance} prefix ${status.distance === 1 ? 'step' : 'steps'} beyond the published frontier.`,
-      body: `The latest exact-configuration range is ${formatRange(status.latest.startPrefix, status.latest.endPrefix)}.`,
-      tone: 'watching',
-    } as const;
-  }
-  if (status.kind === 'passed') {
-    return {
-      eyebrow: 'Not explicitly listed',
-      title: 'AYN has posted later prefixes, but not this one.',
-      body: `The newest exact-configuration range is ${formatRange(status.latest.startPrefix, status.latest.endPrefix)}. We won’t infer shipment across a gap.`,
-      tone: 'passed',
-    } as const;
-  }
-  return {
-    eyebrow: 'No range yet',
-    title: 'AYN has not published this configuration.',
-    body: 'The watch is saved and will be checked whenever the dashboard refreshes.',
-    tone: 'empty',
-  } as const;
-}
-
 export function ThorTracker() {
   const theme = useSyncExternalStore(subscribeToTheme, getThemeSnapshot, getServerThemeSnapshot);
   const [days, setDays] = useState<ShipmentDay[]>(FALLBACK_SHIPMENTS);
@@ -288,8 +243,13 @@ export function ThorTracker() {
   const lastAttemptRef = useRef(0);
   const refreshSequenceRef = useRef(0);
   const activeRefreshRef = useRef<{ id: number; controller: AbortController } | null>(null);
-  const hasLoadedHistoryRef = useRef(false);
-  const latestHistoryDateRef = useRef(FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date ?? '');
+  const observationRef = useRef<Observation | null>(null);
+  const [observation, setObservation] = useState<Observation | null>(null);
+  const [observationOwner, setObservationOwner] = useState('');
+  const [today, setToday] = useState(() => localCalendarDate());
+  const [editingOrder, setEditingOrder] = useState(false);
+  const editButtonRef = useRef<HTMLDivElement>(null);
+  const orderFieldRef = useRef<HTMLInputElement>(null);
 
   const storedWatchSnapshot = useSyncExternalStore(
     subscribeToStoredWatch,
@@ -297,6 +257,7 @@ export function ThorTracker() {
     getServerWatchSnapshot,
   );
   const watch = useMemo(() => safeStoredWatch(storedWatchSnapshot), [storedWatchSnapshot]);
+  const experience = useExperience(watch, observation, !refreshing && sourceState !== 'checking', today, observationOwner);
   const [orderDraft, setOrderDraft] = useState<string | null>(null);
   const [colorDraft, setColorDraft] = useState<ThorColor | null>(null);
   const [modelDraft, setModelDraft] = useState<ModelId | null>(null);
@@ -323,124 +284,104 @@ export function ThorTracker() {
   const refreshData = useCallback(async (manual = false) => {
     if (activeRefreshRef.current && !manual) return;
     if (activeRefreshRef.current) activeRefreshRef.current.controller.abort();
-
-    const id = refreshSequenceRef.current + 1;
-    refreshSequenceRef.current = id;
+    const id = ++refreshSequenceRef.current;
+    const requestWatch = watchIdentity(safeStoredWatch(getStoredWatchSnapshot()));
     const controller = new AbortController();
     activeRefreshRef.current = { id, controller };
     const clientTimeout = window.setTimeout(() => controller.abort(), CLIENT_REFRESH_TIMEOUT_MS);
+    const currentRequest = () => refreshSequenceRef.current === id && requestWatch === watchIdentity(safeStoredWatch(getStoredWatchSnapshot()));
+    const display = (next: Observation) => {
+      observationRef.current = next;
+      setObservation(next);
+      setObservationOwner(requestWatch);
+      setDays(next.days);
+      setSourceUpdatedAt(next.sourceUpdatedAt);
+    };
+    const savedObservation = () => {
+      const cached = readShipmentCache(getBrowserStorage());
+      const candidate = cached ? cacheObservation(cached) : null;
+      const companion = readExperience(getBrowserStorage())?.latest ?? null;
+      const previous = companion && !isOlderObservation(companion, observationRef.current) ? companion : observationRef.current;
+      const best = candidate && !isOlderObservation(candidate, previous) ? candidate : previous;
+      return best ? { ...best, source: 'device' as const, archivedAt: best.source === 'live' ? best.checkedAt : best.archivedAt } : null;
+    };
     setRefreshing(true);
     setSourceState('checking');
+    setToday(localCalendarDate());
     if (manual) setRefreshNotice('Checking AYN for the latest shipment ranges…');
     lastAttemptRef.current = Date.now();
     const attemptedAt = new Date().toISOString();
     try {
-      const response = await fetch(SHIPMENTS_API_URL, {
-        cache: 'no-store',
-        headers: { Accept: 'application/json' },
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`Shipment feed returned ${response.status}`);
-      const servedFromDeviceCache = response.headers.get('X-Thor-Track-Offline') === '1';
+      const response = await fetch(SHIPMENTS_API_URL, { cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal });
+      if (!response.ok) throw new Error('Shipment feed unavailable');
+      const offline = response.headers.get('X-Thor-Track-Offline') === '1';
       const payload = (await response.json()) as {
-        status?: string;
-        checkedAt?: string;
-        sourceUpdatedAt?: string | null;
-        history?: ShipmentFeedHistory;
-        days?: ShipmentDay[];
+        status?: string; checkedAt?: string; archivedAt?: string | null;
+        sourceUpdatedAt?: string | null; history?: ShipmentFeedHistory; days?: ShipmentDay[];
       };
-      if (
-        (payload.status !== 'live' && payload.status !== 'archived') ||
-        !isShipmentHistory(payload.days)
-      ) {
-        throw new Error('Shipment feed payload was invalid');
+      if ((payload.status !== 'live' && payload.status !== 'archived') || !isShipmentHistory(payload.days)) throw new Error('Invalid shipment feed');
+      if (!currentRequest()) return;
+      const validTime = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+      const checkedAt = validTime(payload.checkedAt) ?? (offline ? null : attemptedAt);
+      const source = offline ? 'device' : payload.status === 'live' ? 'live' : 'archive';
+      const next: Observation = {
+        days: normalizeSnapshotDays(payload.days), source, checkedAt,
+        archivedAt: offline && payload.status === 'live' ? checkedAt : validTime(payload.archivedAt),
+        sourceUpdatedAt: validTime(payload.sourceUpdatedAt),
+      };
+      if (isOlderObservation(next, savedObservation())) {
+        const saved = savedObservation();
+        if (saved) display(saved);
+        setSourceState('archive');
+        setRefreshNotice('The feed returned older history. Keeping the newer saved observation; unable to confirm new changes.');
+        return;
       }
-      if (refreshSequenceRef.current !== id) return;
-
-      const sourceUpdatedAt = payload.sourceUpdatedAt ?? null;
       const savedOnDevice = writeShipmentCache(getBrowserStorage(), {
-        savedAt: payload.checkedAt ?? attemptedAt,
-        sourceUpdatedAt,
-        days: payload.days,
+        savedAt: attemptedAt, sourceUpdatedAt: next.sourceUpdatedAt, days: next.days,
+        checkedAt, archivedAt: next.archivedAt, source: source === 'live' ? 'live' : 'archive',
       });
-      setDays(payload.days);
-      setSourceUpdatedAt(sourceUpdatedAt);
-      hasLoadedHistoryRef.current = true;
-      latestHistoryDateRef.current = payload.days[payload.days.length - 1]?.date ?? '';
-      const checkedAt = payload.checkedAt ?? attemptedAt;
-      if (payload.status === 'live' && !servedFromDeviceCache) {
-        setSourceState('live');
-        const retainedDays = Math.max(0, payload.history?.retainedDayCount ?? 0);
-        const archiveCopy = payload.history?.persisted
-          ? retainedDays > 0
-            ? ` ${retainedDays} earlier update ${retainedDays === 1 ? 'day is' : 'days are'} retained in the archive.`
-            : ' Shipment history is saved in the archive.'
-          : savedOnDevice
-            ? ' This device saved a copy.'
-            : ' History storage is currently unavailable.';
-        setRefreshNotice(`Live AYN data checked at ${formatCheckedAt(checkedAt)}.${archiveCopy}`);
-      } else {
-        setSourceState('archive');
-        const archiveDate = payload.days[payload.days.length - 1]?.date;
-        setRefreshNotice(
-          servedFromDeviceCache
-            ? `The tracker is offline. Showing this device’s saved history${archiveDate ? ` through ${formatDate(archiveDate)}` : ''}.`
-            : `AYN is unavailable as of ${formatCheckedAt(checkedAt)}. Showing saved history${archiveDate ? ` through ${formatDate(archiveDate)}` : ''}.`,
-        );
-      }
+      display(next);
+      setSourceState(source === 'live' ? 'live' : 'archive');
+      setRefreshNotice(source === 'live'
+        ? 'Live AYN data checked at ' + formatCheckedAt(checkedAt) + '.' + (payload.history?.persisted ? ' Shipment history is saved in the archive.' : savedOnDevice ? ' This device saved a copy.' : ' History storage is unavailable.')
+        : (offline ? 'The tracker is offline. ' : 'AYN is unavailable. ') + 'Showing saved history through ' + formatDate(next.days[next.days.length - 1].date) + '.');
     } catch {
-      if (refreshSequenceRef.current !== id) return;
-      const cached = readShipmentCache(getBrowserStorage());
-      if (cached) {
-        const cachedDays = mergeShipmentDays(FALLBACK_SHIPMENTS, cached.days);
-        setDays(cachedDays);
-        setSourceUpdatedAt(cached.sourceUpdatedAt);
-        hasLoadedHistoryRef.current = true;
-        latestHistoryDateRef.current = cachedDays[cachedDays.length - 1]?.date ?? '';
+      if (!currentRequest()) return;
+      const saved = savedObservation();
+      if (saved) {
+        display(saved);
         setSourceState('archive');
-        setRefreshNotice(
-          `The tracker could not be reached at ${formatCheckedAt(attemptedAt)}. Showing this device’s saved history through ${formatDate(latestHistoryDateRef.current)}.`,
-        );
-      } else if (hasLoadedHistoryRef.current) {
-        setSourceState('archive');
-        setRefreshNotice(
-          `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing the history already loaded${latestHistoryDateRef.current ? ` through ${formatDate(latestHistoryDateRef.current)}` : ''}.`,
-        );
+        setRefreshNotice('Live refresh failed at ' + formatCheckedAt(attemptedAt) + '. Showing this device’s saved history.');
       } else {
         setSourceState('fallback');
-        const fallbackDate = FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]?.date;
-        setRefreshNotice(
-          `Live refresh failed at ${formatCheckedAt(attemptedAt)}. Showing bundled history${fallbackDate ? ` through ${formatDate(fallbackDate)}` : ''}.`,
-        );
+        setRefreshNotice('Live refresh failed at ' + formatCheckedAt(attemptedAt) + '. Showing bundled reference history.');
       }
     } finally {
       window.clearTimeout(clientTimeout);
-      if (refreshSequenceRef.current === id) {
-        activeRefreshRef.current = null;
-        setRefreshing(false);
-      }
+      if (refreshSequenceRef.current === id) { activeRefreshRef.current = null; setRefreshing(false); }
     }
   }, []);
 
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => {
       const cached = readShipmentCache(getBrowserStorage());
-      if (cached) {
-        const cachedDays = mergeShipmentDays(FALLBACK_SHIPMENTS, cached.days);
-        setDays(cachedDays);
-        setSourceUpdatedAt(cached.sourceUpdatedAt);
-        hasLoadedHistoryRef.current = true;
-        latestHistoryDateRef.current = cachedDays[cachedDays.length - 1]?.date ?? '';
-        setRefreshNotice(
-          `Showing this device’s saved history through ${formatDate(latestHistoryDateRef.current)} while checking AYN…`,
-        );
+      const saved = readExperience(getBrowserStorage())?.latest ?? null;
+      const candidate = cached ? cacheObservation(cached) : null;
+      const best = candidate && !isOlderObservation(candidate, saved) ? candidate : saved;
+      if (best) {
+        observationRef.current = best;
+        setObservation(best);
+        setObservationOwner(watchIdentity(safeStoredWatch(getStoredWatchSnapshot())));
+        setDays(best.days);
+        setSourceUpdatedAt(best.sourceUpdatedAt);
       }
       void refreshData();
     }, 0);
     const interval = window.setInterval(() => void refreshData(), REFRESH_INTERVAL_MS);
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastAttemptRef.current >= REFRESH_INTERVAL_MS) {
-        void refreshData();
+      if (document.visibilityState === 'visible') {
+        setToday(localCalendarDate());
+        if (Date.now() - lastAttemptRef.current >= REFRESH_INTERVAL_MS) void refreshData();
       }
     };
     document.addEventListener('visibilitychange', refreshWhenVisible);
@@ -455,18 +396,34 @@ export function ThorTracker() {
     };
   }, [refreshData]);
 
+  useEffect(() => {
+    let timer: number;
+    const schedule = () => {
+      const midnight = new Date();
+      midnight.setHours(24, 0, 0, 50);
+      timer = window.setTimeout(() => { setToday(localCalendarDate()); schedule(); }, midnight.getTime() - Date.now());
+    };
+    schedule();
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const lastWatchRef = useRef(storedWatchSnapshot);
+  useEffect(() => {
+    if (lastWatchRef.current === storedWatchSnapshot) return;
+    lastWatchRef.current = storedWatchSnapshot;
+    const timer = window.setTimeout(() => {
+      setEditingOrder(false);
+      setOrderDraft(null); setColorDraft(null); setModelDraft(null);
+      void refreshData(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [storedWatchSnapshot, refreshData]);
+
   const latestDay = days[days.length - 1] ?? FALLBACK_SHIPMENTS[FALLBACK_SHIPMENTS.length - 1]!;
   const latestVariants = useMemo(() => latestByVariant(days), [days]);
   const filteredLatest = useMemo(
     () => latestVariants.filter((entry) => colorFilter === 'All' || entry.color === colorFilter),
     [colorFilter, latestVariants],
-  );
-
-  const watchedStatus = useMemo(() => (watch ? evaluateWatch(days, watch) : null), [days, watch]);
-  const watchedCopy = watchedStatus ? statusCopy(watchedStatus) : null;
-  const watchedForecast = useMemo(
-    () => (watch && watchedStatus?.kind === 'watching' ? predictShippingWindow(days, watch) : null),
-    [days, watch, watchedStatus],
   );
 
   const [trendColor, trendModel] = trendKey.split(':') as [ThorColor, ModelId];
@@ -505,7 +462,7 @@ export function ThorTracker() {
   function saveWatch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const digits = orderInput.match(/\d/g)?.join('') ?? '';
-    if (digits.length < 4) {
+    if (digits.length < 4 || Number(digits.slice(0, 4)) < 1000) {
       setFormError('Enter at least the first four digits of your AYN order number.');
       setWatchFeedback(null);
       return;
@@ -513,7 +470,9 @@ export function ThorTracker() {
 
     const nextWatch: ShipmentWatch = { prefix: Number(digits.slice(0, 4)), color, model };
     const persisted = writeStoredWatch(nextWatch);
-    setOrderDraft(`${nextWatch.prefix}xx`);
+    setOrderDraft(null); setColorDraft(null); setModelDraft(null);
+    setEditingOrder(false);
+    window.setTimeout(() => editButtonRef.current?.querySelector('button')?.focus(), 0);
     setFormError('');
     setTrendKeyOverride(variantKey(color, model));
     setTrendSelection(null);
@@ -525,13 +484,25 @@ export function ThorTracker() {
     });
   }
 
+  function editOrder() {
+    setOrderDraft(null); setColorDraft(null); setModelDraft(null);
+    setFormError(''); setWatchFeedback(null); setEditingOrder(true);
+    window.setTimeout(() => orderFieldRef.current?.focus(), 0);
+  }
+  function cancelEdit() {
+    setOrderDraft(null); setColorDraft(null); setModelDraft(null);
+    setFormError(''); setEditingOrder(false);
+    window.setTimeout(() => editButtonRef.current?.querySelector('button')?.focus(), 0);
+  }
   function removeWatch() {
+    setEditingOrder(false);
     setOrderDraft(null);
     setColorDraft(null);
     setModelDraft(null);
     setFormError('');
     setWatchFeedback(null);
     writeStoredWatch(null);
+    window.setTimeout(() => orderFieldRef.current?.focus(), 0);
   }
 
   function toggleTheme() {
@@ -561,7 +532,7 @@ export function ThorTracker() {
               className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-[11px] font-black text-[var(--text-60)] transition hover:bg-[var(--surface)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--paper)]"
             >
               <span aria-hidden="true" className="text-sm leading-none">◐</span>
-              <span className="hidden sm:inline">Theme</span>
+              <span>Theme</span>
             </button>
             <button
               type="button"
@@ -584,8 +555,11 @@ export function ThorTracker() {
       </header>
 
       <div id="top" className="mx-auto max-w-7xl px-5 pb-16 pt-12 sm:px-8 sm:pt-16 lg:px-10">
-        <section className="grid items-end gap-10 lg:grid-cols-[1.06fr_0.94fr]">
-          <div>
+        <section className={watch ? 'flex flex-col gap-6' : 'grid items-end gap-10 lg:grid-cols-[1.06fr_0.94fr]'}>
+          {watch ? <div ref={editButtonRef}><PersonalDashboard key={watchIdentity(watch)} watch={watch} observation={observation ?? experience.visit?.record.latest ?? null}
+            visit={experience.visit && watchIdentity(experience.visit.record.watch) === watchIdentity(watch) ? experience.visit : null}
+            today={today} checking={refreshing || sourceState === 'checking'} unableToCheck={sourceState !== 'live'} persisted={experience.persisted}
+            onEdit={editOrder} onClear={removeWatch} /></div> : <div>
             <p className="mb-5 text-xs font-black uppercase tracking-[0.2em] text-[var(--text-45)]">Independent AYN Thor shipment tracker</p>
             <h1 className="max-w-3xl text-[clamp(3.25rem,7vw,6.8rem)] font-black leading-[0.88] tracking-[-0.075em]">Know when your Thor is in the clear.</h1>
             <p className="mt-7 max-w-xl text-base leading-7 text-[var(--text-60)] sm:text-lg">Save your order prefix and exact configuration. Thor Track watches AYN’s published dispatch ranges and shows where your order stands.</p>
@@ -595,9 +569,9 @@ export function ThorTracker() {
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Only a masked prefix is saved</span>
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-[var(--text-30)]" />Older shipment history is retained</span>
             </div>
-          </div>
+          </div>}
 
-          <section aria-labelledby="watch-title" className="rounded-[28px] border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[0_24px_70px_var(--shadow)] sm:p-7">
+          {!watch || editingOrder ? <section aria-labelledby="watch-title" className={`${watch ? 'order-first ' : ''}rounded-[28px] border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[0_24px_70px_var(--shadow)] sm:p-7`}>
             <div className="mb-6 flex items-start justify-between gap-4">
               <div>
                 <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-40)]">Order watch</p>
@@ -606,10 +580,11 @@ export function ThorTracker() {
               <span className="rounded-full bg-[var(--volt)] px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.14em] text-[var(--accent-ink)]">Auto checks</span>
             </div>
 
-            <form className="space-y-4" onSubmit={saveWatch} noValidate>
+            <form className="space-y-4" onSubmit={saveWatch} noValidate onKeyDown={(event) => { if (event.key === 'Escape' && watch) cancelEdit(); }}>
               <label className="block">
                 <span className="mb-2 block text-xs font-bold text-[var(--text-55)]">AYN order number</span>
                 <input
+                  ref={orderFieldRef}
                   value={orderInput}
                   onChange={(event) => { setOrderDraft(event.target.value); setWatchFeedback(null); }}
                   inputMode="numeric"
@@ -636,8 +611,9 @@ export function ThorTracker() {
                 </label>
               </div>
               <button type="submit" className="h-14 w-full rounded-2xl bg-[var(--ink)] px-5 text-sm font-black text-white transition hover:-translate-y-0.5 hover:bg-[var(--panel-hover)] focus:outline-none focus:ring-4 focus:ring-[var(--focus-ring-strong)] active:translate-y-0">
-                {watch ? 'Update this watch' : 'Watch this order'} <span aria-hidden="true">→</span>
+                {watch ? 'Save' : 'Watch this order'} <span aria-hidden="true">→</span>
               </button>
+              {watch ? <button type="button" onClick={cancelEdit} className="history-toggle">Cancel</button> : null}
               {watchFeedback ? (
                 <p
                   role={watchFeedback.kind === 'session' ? 'alert' : 'status'}
@@ -650,45 +626,8 @@ export function ThorTracker() {
               {formError ? <p id="order-error" role="alert" className="error-message rounded-xl px-3 py-2 text-center text-xs font-bold">{formError}</p> : null}
             </form>
 
-            {watch && watchedCopy ? (
-              <div className={`watch-result watch-result--${watchedCopy.tone} mt-5 rounded-2xl border p-4`} aria-live="polite">
-                <div className="flex items-start justify-between gap-3">
-                  <p className="text-[10px] font-black uppercase tracking-[0.16em]">{watchedCopy.eyebrow}</p>
-                  <button type="button" onClick={removeWatch} className="text-[10px] font-black uppercase tracking-[0.1em] opacity-55 transition hover:opacity-100">Clear</button>
-                </div>
-                <p className="mt-2 text-lg font-black leading-6 tracking-[-0.025em]">{watchedCopy.title}</p>
-                <p className="mt-2 text-xs leading-5 opacity-70">{watchedCopy.body}</p>
-                {watchedStatus?.kind === 'watching' ? (
-                  watchedForecast ? (
-                    <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.07] p-4">
-                      <p className="text-[9px] font-black uppercase tracking-[0.18em] text-[var(--volt)]">Estimated AYN dispatch window</p>
-                      <p className="mt-2 flex flex-wrap items-baseline gap-x-1 text-2xl font-black tracking-[-0.045em]">
-                        <time dateTime={watchedForecast.windowStart}>{formatDate(watchedForecast.windowStart, { year: undefined })}</time>
-                        <span aria-hidden="true">–</span><span className="sr-only">to</span>
-                        <time dateTime={watchedForecast.windowEnd}>{formatDate(watchedForecast.windowEnd)}</time>
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-bold text-white/55">
-                        <span>{confidenceLabel(sourceState === 'live' ? watchedForecast.confidence : watchedForecast.confidence === 'very-low' ? 'very-low' : 'low')}</span>
-                        <span>{watchedForecast.gap} prefix {watchedForecast.gap === 1 ? 'step' : 'steps'} ahead</span>
-                      </div>
-                      <p className="mt-3 text-[11px] leading-5 text-white/55">
-                        Based on {watchedForecast.intervalCount} exact-configuration {watchedForecast.intervalCount === 1 ? 'advance' : 'advances'} through {formatDate(watchedForecast.sourceDate)}. {sourceState === 'live' ? '' : 'AYN live data is unavailable, so this uses the last-known timeline. '}This is a trend estimate for AYN’s dashboard—not an AYN promise or carrier delivery ETA.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.07] p-4">
-                      <p className="text-[9px] font-black uppercase tracking-[0.18em] text-[var(--volt)]">Weekly estimate unavailable</p>
-                      <p className="mt-2 text-[11px] leading-5 text-white/55">A responsible one-week estimate is not available for this queue yet. Its history may be too sparse, too stale, or too far beyond the measured trend.</p>
-                    </div>
-                  )
-                ) : null}
-                <div className="mt-4 flex items-center justify-between gap-3 border-t border-current/10 pt-3 text-[11px] font-bold">
-                  <span>{watch.color} · {shortModelDisplay(watch.model)}</span>
-                  <span className="font-mono">{watch.prefix}xx</span>
-                </div>
-              </div>
-            ) : null}
-          </section>
+          </section> : null}
+          {watchFeedback && watch && !editingOrder ? <p role="status" className="text-sm">{watchFeedback.message}</p> : null}
         </section>
 
         <section className="mt-16 border-t border-[var(--line)] pt-8" aria-labelledby="latest-title">

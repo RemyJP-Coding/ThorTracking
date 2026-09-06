@@ -9,10 +9,14 @@ export type ShipmentCacheSnapshot = {
   savedAt: string;
   sourceUpdatedAt: string | null;
   days: ShipmentDay[];
+  checkedAt?: string | null;
+  archivedAt?: string | null;
+  source?: 'live' | 'archive';
 };
 
 function isIsoDate(value: unknown): value is string {
-  return typeof value === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(value);
+  return typeof value === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 }
 
 function isShipmentEntry(value: unknown) {
@@ -62,6 +66,9 @@ export function readShipmentCache(storage: ShipmentCacheStorage | null): Shipmen
       typeof snapshot.savedAt !== 'string' ||
       !Number.isFinite(Date.parse(snapshot.savedAt)) ||
       (snapshot.sourceUpdatedAt !== null && typeof snapshot.sourceUpdatedAt !== 'string') ||
+      [snapshot.checkedAt, snapshot.archivedAt].some((date) => date != null &&
+        (typeof date !== 'string' || !Number.isFinite(Date.parse(date)))) ||
+      (snapshot.source !== undefined && snapshot.source !== 'live' && snapshot.source !== 'archive') ||
       !isShipmentHistory(snapshot.days)
     ) {
       return null;

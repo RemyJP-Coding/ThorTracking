@@ -37,3 +37,40 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# local credentials and developer bindings
+.dev.vars*
+.npmrc
+
+# diagnostic captures may contain cookies, tokens, or personal data
+*.log
+*.log.[0-9]*
+*.log.gz
+*.har
+*.har.gz
+
+# local databases and their write-ahead logs (keep SQL migrations tracked)
+*.db
+*.db-*
+*.db3
+*.db3-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# private keys, certificate containers, and keystores
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# only sanitized, root-level configuration examples may be shared
+!/.env.example
+!/.dev.vars.example

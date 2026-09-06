@@ -52,6 +52,35 @@ export type ShippingForecast = {
   confidence: 'very-low' | 'low' | 'moderate';
 };
 
+export type ForecastUnavailableReason =
+  | 'no-data'
+  | 'no-configuration'
+  | 'listed'
+  | 'passed'
+  | 'source-stale'
+  | 'configuration-inactive'
+  | 'insufficient-history'
+  | 'unusable-pace'
+  | 'beyond-horizon';
+
+export type ForecastEvidence = {
+  sourceDate: string | null;
+  lastAdvanceDate: string | null;
+  latestPrefix: number | null;
+  gap: number | null;
+  ratePerDay: number | null;
+  intervalCount: number | null;
+  historySpanDays: number | null;
+  observedMovement: number | null;
+  projectedDays: number | null;
+  sourceAgeDays: number | null;
+  observationCount: number | null;
+};
+
+export type ForecastAssessment =
+  | { kind: 'available'; forecast: ShippingForecast; evidence: ForecastEvidence }
+  | { kind: 'unavailable'; reason: ForecastUnavailableReason; evidence: ForecastEvidence };
+
 export type ShipmentTrendPoint = ShipmentEntry & {
   date: string;
   deltaFromPrevious: number | null;
@@ -309,7 +338,7 @@ function addDays(date: string, amount: number) {
   return new Date(dateValue(date) + amount * DAY_IN_MS).toISOString().slice(0, 10);
 }
 
-function localCalendarDate(now = new Date()) {
+export function localCalendarDate(now = new Date()) {
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
@@ -332,15 +361,38 @@ function quantile(values: number[], percentile: number) {
   return sorted[lowerIndex] * (1 - weight) + sorted[upperIndex] * weight;
 }
 
-export function predictShippingWindow(
+export function assessShippingForecast(
   days: ShipmentDay[],
   watch: ShipmentWatch,
   today = localCalendarDate(),
-): ShippingForecast | null {
-  if (days.length === 0) return null;
+): ForecastAssessment {
+  const evidence: ForecastEvidence = {
+    sourceDate: null,
+    lastAdvanceDate: null,
+    latestPrefix: null,
+    gap: null,
+    ratePerDay: null,
+    intervalCount: null,
+    historySpanDays: null,
+    observedMovement: null,
+    projectedDays: null,
+    sourceAgeDays: null,
+    observationCount: 0,
+  };
+  const unavailable = (reason: ForecastUnavailableReason): ForecastAssessment => ({
+    kind: 'unavailable', reason, evidence,
+  });
+  if (days.length === 0) return unavailable('no-data');
+
+  const sourceDate = days.reduce((latest, day) => (day.date > latest ? day.date : latest), days[0].date);
+  const validToday = /^\d{4}-\d{2}-\d{2}$/.test(today) ? today : sourceDate;
+  const asOfDate = validToday > sourceDate ? validToday : sourceDate;
+  const sourceAgeDays = Math.max(0, daysBetween(sourceDate, asOfDate));
+  evidence.sourceDate = sourceDate;
+  evidence.sourceAgeDays = Number.isFinite(sourceAgeDays) ? sourceAgeDays : null;
 
   const variantEntries = entriesForVariant(days, watch.color, watch.model);
-  if (variantEntries.length === 0) return null;
+  if (variantEntries.length === 0) return unavailable('no-configuration');
 
   const dailyEndpoints = new Map<string, number>();
   for (const item of variantEntries) {
@@ -356,18 +408,28 @@ export function predictShippingWindow(
   }
 
   const latestFrontier = frontier[frontier.length - 1];
-  if (!latestFrontier || watch.prefix <= latestFrontier.endPrefix || frontier.length < 2) return null;
-
-  const sourceDate = days.reduce((latest, day) => (day.date > latest ? day.date : latest), days[0].date);
   const observations = [...frontier];
-  if (latestFrontier.date < sourceDate) {
-    observations.push({ date: sourceDate, endPrefix: latestFrontier.endPrefix });
+  if (latestFrontier) {
+    evidence.lastAdvanceDate = latestFrontier.date;
+    evidence.latestPrefix = latestFrontier.endPrefix;
+    evidence.gap = Math.max(0, watch.prefix - latestFrontier.endPrefix);
+    if (latestFrontier.date < sourceDate) {
+      observations.push({ date: sourceDate, endPrefix: latestFrontier.endPrefix });
+    }
   }
 
   const recentCutoff = addDays(sourceDate, -28);
   let training = observations.filter((point) => point.date >= recentCutoff).slice(-8);
   if (training.length < 3) training = observations.slice(-3);
-  if (training.length < 2) return null;
+  evidence.observationCount = training.length;
+  evidence.intervalCount = training.slice(1).filter((point, index) => point.endPrefix > training[index].endPrefix).length;
+  const firstTraining = training[0];
+  const lastTraining = training[training.length - 1];
+  if (firstTraining && lastTraining) {
+    const historySpanDays = daysBetween(firstTraining.date, lastTraining.date);
+    evidence.historySpanDays = Number.isFinite(historySpanDays) ? historySpanDays : null;
+    evidence.observedMovement = lastTraining.endPrefix - firstTraining.endPrefix;
+  }
 
   const pairwiseRates: number[] = [];
   for (let startIndex = 0; startIndex < training.length - 1; startIndex += 1) {
@@ -378,22 +440,28 @@ export function predictShippingWindow(
     }
   }
 
-  if (pairwiseRates.length === 0) return null;
-  const ratePerDay = median(pairwiseRates);
-  if (!Number.isFinite(ratePerDay) || ratePerDay <= 0) return null;
+  const ratePerDay = pairwiseRates.length > 0 ? median(pairwiseRates) : null;
+  evidence.ratePerDay = ratePerDay !== null && Number.isFinite(ratePerDay) ? ratePerDay : null;
+  if (evidence.gap !== null && evidence.gap > 0 && ratePerDay !== null && Number.isFinite(ratePerDay) && ratePerDay > 0) {
+    evidence.projectedDays = Math.max(1, Math.ceil(evidence.gap / ratePerDay));
+  }
+
+  // Choose the most useful reason independently of the unchanged forecasting math.
+  const status = evaluateWatch(days, watch);
+  if (status.kind === 'listed') return unavailable('listed');
+  if (status.kind === 'passed') return unavailable('passed');
+  if (sourceAgeDays > 45) return unavailable('source-stale');
+  if (latestFrontier && daysBetween(latestFrontier.date, asOfDate) > 28) return unavailable('configuration-inactive');
+  if (!latestFrontier || frontier.length < 2 || training.length < 2) return unavailable('insufficient-history');
+  const observedMovement = evidence.observedMovement;
+  if (
+    pairwiseRates.length === 0 || ratePerDay === null || !Number.isFinite(ratePerDay) || ratePerDay <= 0 ||
+    observedMovement === null || observedMovement <= 0
+  ) return unavailable('unusable-pace');
 
   const gap = watch.prefix - latestFrontier.endPrefix;
-  const observedMovement = training[training.length - 1]!.endPrefix - training[0].endPrefix;
-  if (observedMovement <= 0) return null;
-
   const projectedDays = Math.max(1, Math.ceil(gap / ratePerDay));
-  if (projectedDays > 90) return null;
-
-  const validToday = /^\d{4}-\d{2}-\d{2}$/.test(today) ? today : sourceDate;
-  const asOfDate = validToday > sourceDate ? validToday : sourceDate;
-  const sourceAgeDays = Math.max(0, daysBetween(sourceDate, asOfDate));
-  if (sourceAgeDays > 45) return null;
-  if (daysBetween(latestFrontier.date, asOfDate) > 28) return null;
+  if (projectedDays > 90) return unavailable('beyond-horizon');
 
   const projectedCrossing = addDays(asOfDate, projectedDays);
   const earliestPossibleStart = addDays(asOfDate, 1);
@@ -404,13 +472,13 @@ export function predictShippingWindow(
   const lowerQuartile = quantile(pairwiseRates, 0.25);
   const upperQuartile = quantile(pairwiseRates, 0.75);
   const spreadRatio = lowerQuartile > 0 ? upperQuartile / lowerQuartile : Number.POSITIVE_INFINITY;
-  const intervalCount = training.slice(1).filter((point, index) => point.endPrefix > training[index].endPrefix).length;
-  const historySpanDays = daysBetween(training[0].date, training[training.length - 1]!.date);
+  const intervalCount = evidence.intervalCount;
+  const historySpanDays = evidence.historySpanDays;
   let confidence: ShippingForecast['confidence'] = intervalCount === 1 ? 'very-low' : 'low';
   if (
     training.length >= 4 &&
     intervalCount >= 3 &&
-    historySpanDays >= 14 &&
+    historySpanDays !== null && historySpanDays >= 14 &&
     spreadRatio <= 3 &&
     gap <= observedMovement &&
     projectedDays <= historySpanDays &&
@@ -420,17 +488,100 @@ export function predictShippingWindow(
   }
 
   return {
-    windowStart,
-    windowEnd,
-    asOfDate,
-    sourceDate,
-    lastVariantDate: latestFrontier.date,
-    ratePerDay,
-    intervalCount,
-    latestPrefix: latestFrontier.endPrefix,
-    gap,
-    confidence,
+    kind: 'available',
+    forecast: {
+      windowStart,
+      windowEnd,
+      asOfDate,
+      sourceDate,
+      lastVariantDate: latestFrontier.date,
+      ratePerDay,
+      intervalCount,
+      latestPrefix: latestFrontier.endPrefix,
+      gap,
+      confidence,
+    },
+    evidence,
   };
+}
+
+export function predictShippingWindow(
+  days: ShipmentDay[],
+  watch: ShipmentWatch,
+  today = localCalendarDate(),
+): ShippingForecast | null {
+  const assessment = assessShippingForecast(days, watch, today);
+  return assessment.kind === 'available' ? assessment.forecast : null;
+}
+
+export function forecastUnavailableCopy(reason: ForecastUnavailableReason): string {
+  const copy: Record<ForecastUnavailableReason, string> = {
+    'no-data': 'There is no saved shipment history to estimate from yet.',
+    'no-configuration': 'There are no published ranges for your exact color and model yet.',
+    listed: 'Your prefix is explicitly listed in a published range, so a listing estimate is no longer needed.',
+    passed: 'Published ranges have passed your prefix, but the saved history does not explicitly list it. This does not confirm shipment.',
+    'source-stale': 'The latest dashboard date is more than 45 days old. A newer update is needed for an estimate.',
+    'configuration-inactive': 'Your configuration has not advanced for more than 28 days. More recent progress is needed for an estimate.',
+    'insufficient-history': 'An estimate needs at least two published endpoints showing an advance for your exact configuration.',
+    'unusable-pace': 'The recorded history does not provide a usable positive pace for an estimate.',
+    'beyond-horizon': 'The current pace projects beyond the 90-day estimate limit.',
+  };
+  return copy[reason];
+}
+
+export function explainForecastChange(previous: ForecastAssessment, current: ForecastAssessment): string[] {
+  const explanations: string[] = [];
+  const before = previous.evidence;
+  const after = current.evidence;
+  const inputKeys: Array<keyof ForecastEvidence> = [
+    'sourceDate', 'lastAdvanceDate', 'latestPrefix', 'gap', 'ratePerDay', 'intervalCount',
+    'historySpanDays', 'observedMovement', 'projectedDays', 'observationCount',
+  ];
+  const sameInputs = inputKeys.every((key) => before[key] === after[key]);
+  const evaluationDateChanged = previous.kind === 'available' && current.kind === 'available'
+    ? previous.forecast.asOfDate !== current.forecast.asOfDate
+    : before.sourceAgeDays !== after.sourceAgeDays;
+
+  if (previous.kind === 'available' && current.kind === 'available') {
+    const shift = daysBetween(previous.forecast.windowStart, current.forecast.windowStart);
+    if (shift !== 0) {
+      const amount = Math.abs(shift);
+      explanations.push(`The estimated listing window moved ${amount} ${amount === 1 ? 'day' : 'days'} ${shift < 0 ? 'earlier' : 'later'}.`);
+    }
+  } else if (current.kind === 'available') {
+    explanations.push('A listing estimate is now available.');
+  } else if (previous.kind === 'available' || previous.reason !== current.reason) {
+    explanations.push(forecastUnavailableCopy(current.reason));
+  }
+
+  if (sameInputs && evaluationDateChanged) {
+    explanations.push('The evaluation date changed; the forecast was recalculated with unchanged shipment evidence.');
+  } else if (!sameInputs) {
+    const detailStart = explanations.length;
+    if (before.latestPrefix !== null && after.latestPrefix !== null && before.latestPrefix !== after.latestPrefix) {
+      const change = after.latestPrefix - before.latestPrefix;
+      explanations.push(change > 0
+        ? `Your configuration's published endpoint advanced by ${change} prefix ${change === 1 ? 'step' : 'steps'}.`
+        : `The recorded endpoint is ${Math.abs(change)} prefix ${change === -1 ? 'step' : 'steps'} lower than before.`);
+    }
+    if (before.gap !== null && after.gap !== null && before.gap !== after.gap) {
+      explanations.push(`The remaining gap ${after.gap < before.gap ? 'narrowed' : 'grew'} from ${before.gap} to ${after.gap} prefix steps.`);
+    }
+    if (before.ratePerDay !== null && after.ratePerDay !== null && before.ratePerDay !== after.ratePerDay) {
+      const pace = (value: number) => value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+      explanations.push(`The observed pace ${after.ratePerDay > before.ratePerDay ? 'increased' : 'decreased'} from ${pace(before.ratePerDay)} to ${pace(after.ratePerDay)} prefix steps per day.`);
+    }
+    if (before.sourceDate !== after.sourceDate && before.latestPrefix !== null && before.latestPrefix === after.latestPrefix) {
+      explanations.push('The dashboard date changed, but your configuration\'s published endpoint did not advance.');
+    }
+    if (explanations.length === detailStart) explanations.push('The shipment history used by the forecast changed.');
+  }
+
+  if (previous.kind === 'available' && current.kind === 'available' && previous.forecast.confidence !== current.forecast.confidence) {
+    explanations.push(`The confidence label changed from ${previous.forecast.confidence.replace('-', ' ')} to ${current.forecast.confidence.replace('-', ' ')}.`);
+  }
+  if (explanations.length === 0) explanations.push('The forecast assessment is unchanged.');
+  return explanations;
 }
 
 function entry(sourceVariant: string, startPrefix: number, endPrefix: number): ShipmentEntry {
