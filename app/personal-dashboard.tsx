@@ -68,7 +68,7 @@ export function PersonalDashboard({ watch, observation, visit, today, checking, 
       {observation ? <p>{status.kind === 'listed' ? `Your prefix appears in ${masked(status.match.startPrefix)}–${masked(status.match.endPrefix)}, published ${date(status.date)}.`
         : status.kind === 'passed' ? 'AYN has posted later prefixes, but no matching range includes yours. Shipment is not confirmed.'
         : status.kind === 'watching' ? `${status.distance} prefix steps remain to your prefix.`
-        : 'Your watch is saved. The endpoint baseline will begin when data for this exact configuration becomes available.'}</p> : <p>{checking ? 'Checking AYN for a settled shipment snapshot…' : 'Only bundled reference data is available. Personal history begins when live or saved observations are available.'}</p>}
+        : 'Your watch is saved. Progress tracking begins when shipment ranges for this exact configuration become available.'}</p> : <p>{checking ? 'Checking AYN for the latest shipment ranges…' : 'Only bundled reference data is available. Personal history begins when live or saved shipment updates are available.'}</p>}
       {observation ? <p className="personal-meta">Using {sourceLabel(observation.source)}{observation.archivedAt && observation.source !== 'live' ? ` · Last successful source check ${instant(observation.archivedAt)}` : observation.checkedAt ? ` · Checked ${instant(observation.checkedAt)}` : ''}</p> : null}
     </div>
 
@@ -123,8 +123,8 @@ export function PersonalDashboard({ watch, observation, visit, today, checking, 
           {comparison.previousStatus !== comparison.currentStatus ? <p className="font-bold">Status: {statusLabel(comparison.previousStatus)} → {statusLabel(comparison.currentStatus)}.</p> : null}
         </>}
         {comparison.others.length ? <details><summary>Other configuration updates ({comparison.others.length})</summary>{comparison.others.map((change) => <div className="other-change" key={`${change.color}:${change.model}`}><h3>{change.color} · {shortModelDisplay(change.model)}</h3><ChangeDetails change={change} /></div>)}</details> : null}
-      </> : <p>Waiting for a settled observation to compare.</p>}
-      <p className="personal-meta">A visit starts on page load, or after this page was hidden for at least 30 minutes. Refreshing data keeps this visit’s comparison visible.</p>
+      </> : <p>Waiting for shipment history to compare.</p>}
+      <p className="personal-meta">A visit starts when you open Thor Track, or return after it was out of view for at least 30 minutes. Refreshing keeps this visit’s comparison visible.</p>
     </section>
 
     <section className="personal-card" aria-labelledby="history-title">
@@ -135,9 +135,9 @@ export function PersonalDashboard({ watch, observation, visit, today, checking, 
         <p className="font-bold">{entry.assessment.kind === 'available' ? `${date(entry.assessment.forecast.windowStart)} – ${date(entry.assessment.forecast.windowEnd)} · ${entry.confidence?.replace('-', ' ')} confidence` : `Estimate unavailable · ${forecastUnavailableCopy(entry.assessment.reason)}`}</p>
         <p>{statusLabel(entry.status)}</p>
         {entry.changes.map((change) => <p key={change}>{change}</p>)}
-      </li>)}</ol> : <p>{checking ? 'History begins after the current check finishes while this page is visible.' : 'No settled assessment has been recorded yet.'}</p>}
+      </li>)}</ol> : <p>{checking ? 'History begins after the current check finishes while Thor Track is visible.' : 'No assessment has been recorded yet.'}</p>}
       {history.length > 5 ? <button type="button" className="history-toggle" aria-expanded={showHistory} onClick={() => setShowHistory(!showHistory)}>{showHistory ? 'Show recent history' : `Show history (${history.length})`}</button> : null}
-      {!persisted ? <p className="revision-note" role="status">Browser storage is unavailable. Your watch and history are kept for this tab only.</p> : null}
+      {!persisted ? <p className="revision-note" role="status">Your watch and history could not be saved on this device. They are kept only while this window is open.</p> : null}
     </section>
   </section>;
 }

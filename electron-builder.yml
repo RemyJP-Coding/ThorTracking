@@ -1,0 +1,30 @@
+appId: com.thortrack.desktop
+productName: Thor Track
+directories:
+  output: release
+# Workerd and its modules must be real files; do not run native helpers inside ASAR.
+asar: false
+npmRebuild: false
+files:
+  - desktop/**
+  - dist/server/**
+  - dist/client/**
+  - '!dist/**/.vite/**'
+  - '!dist/**/*.map'
+  - drizzle/*.sql
+  - drizzle/meta/_journal.json
+  - package.json
+win:
+  icon: desktop/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: Thor-Track-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Thor Track
+  deleteAppDataOnUninstall: false

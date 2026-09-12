@@ -143,6 +143,18 @@ function getServerWatchSnapshot() {
   return '';
 }
 
+function subscribeToDesktop() {
+  return () => {};
+}
+
+function getDesktopSnapshot() {
+  return Boolean(window.thorTrackDesktop);
+}
+
+function getServerDesktopSnapshot() {
+  return false;
+}
+
 function writeStoredWatch(watch: ShipmentWatch | null) {
   const result = writeWatchSnapshot(getBrowserStorage(), watch);
   volatileWatchSnapshot = result.snapshot;
@@ -235,6 +247,8 @@ function writeTheme(theme: Theme) {
 
 export function ThorTracker() {
   const theme = useSyncExternalStore(subscribeToTheme, getThemeSnapshot, getServerThemeSnapshot);
+  const desktop = useSyncExternalStore(subscribeToDesktop, getDesktopSnapshot, getServerDesktopSnapshot);
+  const [desktopNotice, setDesktopNotice] = useState<string | null>(null);
   const [days, setDays] = useState<ShipmentDay[]>(FALLBACK_SHIPMENTS);
   const [sourceState, setSourceState] = useState<SourceState>('checking');
   const [sourceUpdatedAt, setSourceUpdatedAt] = useState<string | null>(null);
@@ -273,8 +287,26 @@ export function ThorTracker() {
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [showAllTimeline, setShowAllTimeline] = useState(false);
 
+  const syncDesktopWatch = useCallback(async () => {
+    if (!window.thorTrackDesktop) return;
+    try {
+      // Read storage directly: the first hydrated render may still have the empty server snapshot.
+      await window.thorTrackDesktop.setWatch(safeStoredWatch(getStoredWatchSnapshot()));
+      setDesktopNotice(null);
+    } catch {
+      setDesktopNotice('Notifications could not be started. Try Refresh, or exit and reopen Thor Track.');
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void syncDesktopWatch(), 0);
+    return () => window.clearTimeout(timer);
+  }, [storedWatchSnapshot, syncDesktopWatch]);
+
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production') return;
+    // Desktop ships its shell with the app; a browser service worker could retain an older build.
+    if (window.location.protocol === 'thor-track:') return;
     if (!('serviceWorker' in navigator)) return;
     void navigator.serviceWorker.register('/sw.js').catch(() => {
       // The live app and browser data cache still work when registration is blocked.
@@ -312,6 +344,8 @@ export function ThorTracker() {
     lastAttemptRef.current = Date.now();
     const attemptedAt = new Date().toISOString();
     try {
+      await syncDesktopWatch();
+      if (!currentRequest()) return;
       const response = await fetch(SHIPMENTS_API_URL, { cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal });
       if (!response.ok) throw new Error('Shipment feed unavailable');
       const offline = response.headers.get('X-Thor-Track-Offline') === '1';
@@ -333,7 +367,7 @@ export function ThorTracker() {
         const saved = savedObservation();
         if (saved) display(saved);
         setSourceState('archive');
-        setRefreshNotice('The feed returned older history. Keeping the newer saved observation; unable to confirm new changes.');
+        setRefreshNotice('The latest check returned older history. Keeping your newer saved history; unable to confirm new changes.');
         return;
       }
       const savedOnDevice = writeShipmentCache(getBrowserStorage(), {
@@ -343,7 +377,7 @@ export function ThorTracker() {
       display(next);
       setSourceState(source === 'live' ? 'live' : 'archive');
       setRefreshNotice(source === 'live'
-        ? 'Live AYN data checked at ' + formatCheckedAt(checkedAt) + '.' + (payload.history?.persisted ? ' Shipment history is saved in the archive.' : savedOnDevice ? ' This device saved a copy.' : ' History storage is unavailable.')
+        ? 'Live AYN data checked at ' + formatCheckedAt(checkedAt) + '.' + (payload.history?.persisted ? ' Shipment history saved.' : savedOnDevice ? ' Saved on this device.' : ' History could not be saved.')
         : (offline ? 'The tracker is offline. ' : 'AYN is unavailable. ') + 'Showing saved history through ' + formatDate(next.days[next.days.length - 1].date) + '.');
     } catch {
       if (!currentRequest()) return;
@@ -351,16 +385,16 @@ export function ThorTracker() {
       if (saved) {
         display(saved);
         setSourceState('archive');
-        setRefreshNotice('Live refresh failed at ' + formatCheckedAt(attemptedAt) + '. Showing this device’s saved history.');
+        setRefreshNotice('Unable to check AYN at ' + formatCheckedAt(attemptedAt) + '. Showing this device’s saved history.');
       } else {
         setSourceState('fallback');
-        setRefreshNotice('Live refresh failed at ' + formatCheckedAt(attemptedAt) + '. Showing bundled reference history.');
+        setRefreshNotice('Unable to check AYN at ' + formatCheckedAt(attemptedAt) + '. Showing bundled reference history.');
       }
     } finally {
       window.clearTimeout(clientTimeout);
       if (refreshSequenceRef.current === id) { activeRefreshRef.current = null; setRefreshing(false); }
     }
-  }, []);
+  }, [syncDesktopWatch]);
 
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => {
@@ -377,7 +411,10 @@ export function ThorTracker() {
       }
       void refreshData();
     }, 0);
-    const interval = window.setInterval(() => void refreshData(), REFRESH_INTERVAL_MS);
+    const interval = window.setInterval(() => {
+      if (window.thorTrackDesktop && document.hidden) return;
+      void refreshData();
+    }, REFRESH_INTERVAL_MS);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') {
         setToday(localCalendarDate());
@@ -406,6 +443,8 @@ export function ThorTracker() {
     schedule();
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => window.thorTrackDesktop?.onRefreshRequested(() => { void refreshData(true); }), [refreshData]);
 
   const lastWatchRef = useRef(storedWatchSnapshot);
   useEffect(() => {
@@ -479,8 +518,8 @@ export function ThorTracker() {
     setWatchFeedback({
       kind: persisted ? 'saved' : 'session',
       message: persisted
-        ? `Saved on this browser: watching ${nextWatch.prefix}xx · ${color} · ${shortModelDisplay(model)}.`
-        : `Watching ${nextWatch.prefix}xx for this tab. This phone blocked browser storage, so the watch may disappear when you close it.`,
+        ? `Saved on this device: watching ${nextWatch.prefix}xx · ${color} · ${shortModelDisplay(model)}.`
+        : `Watching ${nextWatch.prefix}xx while this window is open. Your watch could not be saved on this device and will be lost when you close the window.`,
     });
   }
 
@@ -507,6 +546,14 @@ export function ThorTracker() {
 
   function toggleTheme() {
     writeTheme(theme === 'dark' ? 'light' : 'dark');
+  }
+
+  async function desktopAction(action: 'minimize' | 'quit') {
+    try {
+      await window.thorTrackDesktop?.[action]();
+    } catch {
+      setDesktopNotice(action === 'minimize' ? 'Unable to minimize to the system tray. Try the window’s minimize button.' : 'Unable to exit. Try Exit Thor Track from the system tray icon.');
+    }
   }
 
   return (
@@ -555,6 +602,17 @@ export function ThorTracker() {
       </header>
 
       <div id="top" className="mx-auto max-w-7xl px-5 pb-16 pt-12 sm:px-8 sm:pt-16 lg:px-10">
+        {desktop ? <aside aria-label="Desktop notifications" className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4">
+          <div className="min-w-0 flex-1 text-xs leading-5 text-[var(--text-60)]">
+            <p className="font-bold text-[var(--text)]">{watch ? desktopNotice ? 'Your order is on watch.' : `Notifications are on for ${watch.color} · ${shortModelDisplay(watch.model)}.` : 'Save an order watch to get shipment notifications.'}</p>
+            <p>{watch ? 'Checks continue every 10 minutes in the system tray. ' : ''}Minimize or close (×) to the system tray. Choose Show Thor Track from its icon to reopen, or Exit to stop.</p>
+            {desktopNotice ? <p role="alert" className="mt-1 font-bold">{desktopNotice}</p> : null}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={() => void desktopAction('minimize')} className="history-toggle">Minimize to tray</button>
+            <button type="button" aria-label="Exit Thor Track" onClick={() => void desktopAction('quit')} className="history-toggle">Exit</button>
+          </div>
+        </aside> : null}
         <section className={watch ? 'flex flex-col gap-6' : 'grid items-end gap-10 lg:grid-cols-[1.06fr_0.94fr]'}>
           {watch ? <div ref={editButtonRef}><PersonalDashboard key={watchIdentity(watch)} watch={watch} observation={observation ?? experience.visit?.record.latest ?? null}
             visit={experience.visit && watchIdentity(experience.visit.record.watch) === watchIdentity(watch) ? experience.visit : null}
@@ -835,7 +893,7 @@ export function ThorTracker() {
       <footer className="border-t border-[var(--line)]">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-7 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--text-35)] sm:px-8 lg:px-10">
           <span>Thor Track · Unofficial community utility</span>
-          <span>Local watch · Saved public history</span>
+          <span>Your watch · Saved shipment history</span>
         </div>
       </footer>
     </main>

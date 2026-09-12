@@ -170,7 +170,7 @@ try {
     await limitedPage.getByRole('button', { name: 'Watch this order' }).click();
     await limitedPage.waitForSelector('#personal-title');
     await limitedPage.waitForSelector('.forecast-history li');
-    await expectText(limitedPage.locator('.personal-dashboard'), /kept for this tab only/);
+    await expectText(limitedPage.locator('.personal-dashboard'), /kept only while this window is open/);
     await limited.close();
   }
   console.log('PASS blocked storage and failed writes preserve session-only watch/history');

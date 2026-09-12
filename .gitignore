@@ -37,6 +37,7 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/release/
 
 # local credentials and developer bindings
 .dev.vars*
